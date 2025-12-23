@@ -40,14 +40,14 @@ cp "$SCRIPT_DIR/scripts/bmad-autopilot.sh" "$TARGET_DIR/.autopilot/"
 chmod +x "$TARGET_DIR/.autopilot/bmad-autopilot.sh"
 echo "✅ Main script installed"
 
-# Ask about Claude commands
+# Install Claude commands to project-local .claude/commands
 echo ""
-read -p "📦 Install Claude Code commands to ~/.claude/commands? [y/N] " -n 1 -r
+read -p "📦 Install Claude Code commands to $TARGET_DIR/.claude/commands? [y/N] " -n 1 -r
 echo ""
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-  mkdir -p ~/.claude/commands
-  cp "$SCRIPT_DIR/commands/"*.md ~/.claude/commands/
-  echo "✅ Claude commands installed"
+  mkdir -p "$TARGET_DIR/.claude/commands"
+  cp "$SCRIPT_DIR/commands/"*.md "$TARGET_DIR/.claude/commands/"
+  echo "✅ Claude commands installed to .claude/commands/"
 else
   echo "⏭️  Skipped Claude commands"
 fi
