@@ -755,6 +755,99 @@ handle_merged_pr() {
   log "🧹 Cleaned up after merged epic $epic_id"
 }
 
+# Resolve all unresolved review threads on a PR
+# Uses GitHub GraphQL API to mark threads as resolved
+resolve_pr_review_threads() {
+  local pr_number="$1"
+
+  # Get repo owner and name
+  local repo_info
+  repo_info="$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"')"
+
+  if [ -z "$repo_info" ]; then
+    log "⚠️ Could not determine repo info for resolving threads"
+    return 1
+  fi
+
+  log "🔍 Fetching unresolved review threads for PR #$pr_number..."
+
+  # Get all unresolved review threads via GraphQL
+  local threads_query='
+    query($owner: String!, $repo: String!, $pr: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $pr) {
+          reviewThreads(first: 100) {
+            nodes {
+              id
+              isResolved
+              comments(first: 1) {
+                nodes {
+                  body
+                  author { login }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  '
+
+  local owner="${repo_info%%/*}"
+  local repo="${repo_info##*/}"
+
+  local threads_json
+  threads_json="$(gh api graphql -f query="$threads_query" \
+    -F owner="$owner" -F repo="$repo" -F pr="$pr_number" 2>/dev/null || echo "")"
+
+  if [ -z "$threads_json" ]; then
+    debug "Could not fetch review threads"
+    return 0
+  fi
+
+  # Extract unresolved thread IDs
+  local unresolved_threads
+  unresolved_threads="$(echo "$threads_json" | jq -r '
+    .data.repository.pullRequest.reviewThreads.nodes[]
+    | select(.isResolved == false)
+    | .id
+  ' 2>/dev/null || echo "")"
+
+  if [ -z "$unresolved_threads" ]; then
+    debug "No unresolved review threads found"
+    return 0
+  fi
+
+  local resolved_count=0
+  local thread_id
+
+  while IFS= read -r thread_id; do
+    [ -z "$thread_id" ] && continue
+
+    debug "Resolving thread: $thread_id"
+
+    local resolve_mutation='
+      mutation($threadId: ID!) {
+        resolveReviewThread(input: {threadId: $threadId}) {
+          thread { isResolved }
+        }
+      }
+    '
+
+    if gh api graphql -f query="$resolve_mutation" -F threadId="$thread_id" >/dev/null 2>&1; then
+      resolved_count=$((resolved_count + 1))
+    else
+      debug "Failed to resolve thread: $thread_id"
+    fi
+  done <<< "$unresolved_threads"
+
+  if [ "$resolved_count" -gt 0 ]; then
+    log "✅ Resolved $resolved_count review thread(s)"
+  fi
+
+  return 0
+}
+
 # Fix issues in a pending PR (pause active work, switch context)
 fix_pending_pr_issues() {
   local epic_id="$1"
@@ -1486,6 +1579,9 @@ $reply_text"
     # Post the reply
     gh pr comment "$pr_number" --body "$reply_text" 2>/dev/null || true
     log "✅ Posted detailed reply to Copilot review"
+
+    # Resolve review threads after addressing feedback
+    resolve_pr_review_threads "$pr_number"
   fi
 
   rm -f "$TMP_DIR/failed-checks.json" 2>/dev/null || true

@@ -168,6 +168,45 @@ for i in $(seq 1 60); do
 done
 ```
 
+## Review Thread Management
+
+### Get unresolved review threads (GraphQL)
+```bash
+gh api graphql -f query='
+  query($owner: String!, $repo: String!, $pr: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $pr) {
+        reviewThreads(first: 100) {
+          nodes {
+            id
+            isResolved
+            comments(first: 1) {
+              nodes { body author { login } }
+            }
+          }
+        }
+      }
+    }
+  }
+' -F owner="OWNER" -F repo="REPO" -F pr=123
+```
+
+### Resolve a review thread
+```bash
+gh api graphql -f query='
+  mutation($threadId: ID!) {
+    resolveReviewThread(input: {threadId: $threadId}) {
+      thread { isResolved }
+    }
+  }
+' -F threadId="THREAD_NODE_ID"
+```
+
+### Reply to a review comment
+```bash
+gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="Fixed in latest commit"
+```
+
 ## Best Practices
 
 1. **Always use `--json` for scripting** - Parse structured output with `jq`
@@ -175,3 +214,4 @@ done
 3. **Use HEREDOC for multi-line body** - Preserves formatting in PR descriptions
 4. **Check PR state before operations** - Verify OPEN before trying to merge
 5. **Respect rate limits** - Add sleep between repeated API calls
+6. **Resolve threads after fixing** - Use GraphQL mutation to mark threads resolved
