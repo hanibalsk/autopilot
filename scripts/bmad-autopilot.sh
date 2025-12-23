@@ -928,21 +928,52 @@ phase_check_pending_pr() {
     local epic_id="${current_branch#feature/epic-}"
     log "Found feature branch: $current_branch (epic: $epic_id)"
 
-    # Check if there's an open PR for this branch
-    if gh pr view >/dev/null 2>&1; then
-      local pr_number
-      pr_number="$(gh pr view --json number -q '.number')"
-      log "⚠️ Found open PR #$pr_number for epic $epic_id - resuming PR flow"
+    # Check if there's a PR for this branch and its state
+    local pr_info
+    pr_info="$(gh pr view --json number,state -q '{number: .number, state: .state}' 2>/dev/null || echo "")"
 
-      # Clean up stale comment tracking
-      rm -f "$TMP_DIR/last_copilot_comment_id.txt" 2>/dev/null || true
+    if [ -n "$pr_info" ]; then
+      local pr_number pr_state
+      pr_number="$(echo "$pr_info" | jq -r '.number')"
+      pr_state="$(echo "$pr_info" | jq -r '.state')"
+      verbose "   PR #$pr_number state: $pr_state"
 
-      state_set "WAIT_COPILOT" "\"$epic_id\""
-      return 0
+      if [ "$pr_state" = "OPEN" ]; then
+        log "⚠️ Found open PR #$pr_number for epic $epic_id - resuming PR flow"
+        # Clean up stale comment tracking
+        rm -f "$TMP_DIR/last_copilot_comment_id.txt" 2>/dev/null || true
+        state_set "WAIT_COPILOT" "\"$epic_id\""
+        return 0
+      elif [ "$pr_state" = "MERGED" ]; then
+        log "✅ PR #$pr_number was already merged"
+        # Check if there are new changes on this branch since the merge
+        git fetch origin "$BASE_BRANCH" 2>/dev/null || true
+        local new_commits
+        new_commits="$(git log "origin/$BASE_BRANCH..HEAD" --oneline 2>/dev/null | wc -l | tr -d ' ')"
+        if [ "$new_commits" -gt 0 ]; then
+          log "📝 Found $new_commits new commit(s) since merge - will create new PR"
+          state_set "CODE_REVIEW" "\"$epic_id\""
+          return 0
+        else
+          log "   No new changes - switching to $BASE_BRANCH"
+          git checkout "$BASE_BRANCH" 2>/dev/null || true
+          git pull origin "$BASE_BRANCH" 2>/dev/null || true
+        fi
+      elif [ "$pr_state" = "CLOSED" ]; then
+        log "⚠️ PR #$pr_number was closed (not merged)"
+        # Check if there are changes to push
+        git fetch origin "$BASE_BRANCH" 2>/dev/null || true
+        if [ -n "$(git diff "origin/$BASE_BRANCH..HEAD" --name-only 2>/dev/null)" ]; then
+          log "📝 Branch has changes - will create new PR"
+          state_set "CODE_REVIEW" "\"$epic_id\""
+          return 0
+        fi
+      fi
     else
       log "Branch exists but no PR - checking if we need to create one"
-      # Check if there are unpushed commits
+      # Check if there are unpushed commits or changes from base
       git fetch origin "$current_branch" 2>/dev/null || true
+      git fetch origin "$BASE_BRANCH" 2>/dev/null || true
       if [ -n "$(git log "origin/$current_branch..HEAD" 2>/dev/null)" ] || [ -n "$(git diff "origin/$BASE_BRANCH..HEAD" --name-only 2>/dev/null)" ]; then
         log "Found unpushed changes - resuming from CODE_REVIEW"
         state_set "CODE_REVIEW" "\"$epic_id\""
