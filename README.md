@@ -12,6 +12,8 @@ BMAD Autopilot is a state-machine-driven bash orchestrator that automates the en
 - 🔍 **GitHub Copilot Integration** - Waits for reviews, fixes issues, replies to comments
 - ✅ **CI Integration** - Waits for checks, fixes failures automatically
 - 📝 **Detailed Logging** - Full audit trail in `.autopilot/autopilot.log`
+- 🔀 **Parallel Mode** - Work on next epic while waiting for PR review (experimental)
+- 🔒 **Secure Config** - Safe config parsing with whitelisted keys only
 
 ## Prerequisites
 
@@ -48,6 +50,11 @@ chmod +x /your/project/.autopilot/bmad-autopilot.sh
 2. (Optional) Install Claude Code commands:
 
 ```bash
+# Local installation (recommended)
+mkdir -p /your/project/.claude/commands
+cp commands/*.md /your/project/.claude/commands/
+
+# Or global installation
 mkdir -p ~/.claude/commands
 cp commands/*.md ~/.claude/commands/
 ```
@@ -127,14 +134,40 @@ If you installed the Claude Code commands:
 
 ## Configuration
 
+### Configuration File
+
+Copy `config.example` to `.autopilot/config` and customize:
+
+```bash
+cp .autopilot/config.example .autopilot/config
+```
+
+Settings can be configured via (in order of priority):
+1. Command line flags (`--debug`)
+2. Environment variables (`AUTOPILOT_DEBUG=1`)
+3. Config file (`.autopilot/config`)
+
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `AUTOPILOT_DEBUG` | `0` | Enable debug logging to `.autopilot/tmp/debug.log` |
 | `MAX_TURNS` | `80` | Max Claude turns per phase |
 | `CHECK_INTERVAL` | `30` | Seconds between CI/Copilot checks |
-| `MAX_CHECK_WAIT` | `60` | Max iterations waiting for checks |
+| `MAX_CHECK_WAIT` | `60` | Max iterations waiting for CI checks |
+| `MAX_COPILOT_WAIT` | `60` | Max iterations waiting for Copilot review |
 | `AUTOPILOT_RUN_MOBILE_NATIVE` | `0` | Set to `1` to run Gradle builds |
+| `AUTOPILOT_BASE_BRANCH` | auto | Override base branch (auto-detects main/master) |
+
+### Parallel Mode (Experimental)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PARALLEL_MODE` | `0` | Enable parallel epic development |
+| `PARALLEL_CHECK_INTERVAL` | `60` | Seconds between pending PR checks |
+| `MAX_PENDING_PRS` | `2` | Max concurrent PRs waiting for review |
+
+When enabled, the autopilot will start working on the next epic while PRs are waiting for review. Uses git worktrees to manage multiple concurrent branches.
 
 ### Epic Source Files
 
@@ -203,9 +236,20 @@ cat .autopilot/state.json | jq
 rm .autopilot/state.json
 ```
 
-### Debug Copilot Detection
+### Debug Mode
 
-Look for `DEBUG:` lines in the log to see what comments/reviews are being detected.
+```bash
+# Via command line flag
+./.autopilot/bmad-autopilot.sh --debug
+
+# Via environment variable
+AUTOPILOT_DEBUG=1 ./.autopilot/bmad-autopilot.sh
+
+# View debug log
+tail -f .autopilot/tmp/debug.log
+```
+
+Debug mode logs detailed information about Copilot detection, state transitions, and API calls.
 
 ## License
 

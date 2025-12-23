@@ -10,14 +10,39 @@ BMAD Autopilot is a state-machine-driven bash orchestrator that automates the en
 
 The autopilot operates as a finite state machine with the following states:
 
+#### Sequential Mode (default)
 ```
-CHECK_PENDING_PR → FIND_EPIC → CREATE_BRANCH → DEVELOP_STORIES → 
+CHECK_PENDING_PR → FIND_EPIC → CREATE_BRANCH → DEVELOP_STORIES →
 CODE_REVIEW → CREATE_PR → WAIT_COPILOT → WAIT_CHECKS → MERGE_PR → (loop)
                                 ↓              ↓
                            FIX_ISSUES ←────────┘
                                 ↓
                            WAIT_COPILOT (re-review)
 ```
+
+#### Parallel Mode (PARALLEL_MODE=1)
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ACTIVE DEVELOPMENT                    PENDING PRs (background)         │
+│  ┌───────────────────┐                 ┌─────────────────────┐         │
+│  │ FIND_EPIC         │                 │ PR #1: epic-7A      │         │
+│  │ CREATE_BRANCH     │                 │ status: WAIT_REVIEW │◄─check──┤
+│  │ DEVELOP_STORIES   │                 └─────────────────────┘         │
+│  │ CODE_REVIEW       │                 ┌─────────────────────┐         │
+│  │ CREATE_PR ────────┼──add to queue──►│ PR #2: epic-8A      │         │
+│  │      │            │                 │ status: WAIT_CI     │◄─check──┤
+│  │      ▼            │                 └─────────────────────┘         │
+│  │ FIND_EPIC (next)  │                                                  │
+│  └───────────────────┘                 If PR needs fixes:              │
+│                                        → pause active work             │
+│  If MAX_PENDING_PRS reached:           → switch to worktree            │
+│  → WAIT_PENDING_PRS                    → fix & push                    │
+│  → check periodically                  → resume active work            │
+│  → resume when slot opens                                              │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+Parallel mode uses `git worktree` to manage multiple concurrent branches.
 
 ### 2. State Persistence
 
@@ -96,11 +121,11 @@ Two-step review process:
 
 ### WAIT_COPILOT
 
-Monitors PR for Copilot activity:
+Monitors PR for Copilot activity. Copilot review is typically triggered automatically via branch protection on every push.
 
 ```bash
 gh pr view --json comments,reviews -q '
-  [.comments[], .reviews[]] | 
+  [.comments[], .reviews[]] |
   select(.author.login | test("copilot"; "i"))
 '
 ```
@@ -109,6 +134,7 @@ Handles:
 - Regular comments (`.comments[]`)
 - Review comments (`.reviews[]`)
 - Review states: `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`
+- Timeout after `MAX_COPILOT_WAIT` iterations (default: 60)
 
 ### FIX_ISSUES
 
@@ -168,8 +194,12 @@ When the autopilot cannot proceed:
 ### Retry Logic
 
 - Code review: 3 attempts max
-- CI check waiting: 60 iterations (30s each = 30 min)
-- Copilot waiting: Infinite (Copilot always comments)
+- CI check waiting: `MAX_CHECK_WAIT` iterations (default: 60)
+- Copilot waiting: `MAX_COPILOT_WAIT` iterations (default: 60)
+
+### Dirty Working Tree Check
+
+At startup, the script checks for uncommitted changes. If found, it warns the user and requires confirmation before proceeding, preventing accidental loss of work during branch switches.
 
 ## Extensibility
 
@@ -200,4 +230,6 @@ You can customize these in your BMAD configuration.
 2. **GitHub Auth**: Uses `gh` CLI's existing authentication
 3. **Claude Permissions**: Uses `acceptEdits` mode for controlled changes
 4. **Local Only**: `.autopilot/` should be gitignored
+5. **Safe Config Parsing**: Config file uses whitelisted keys only, preventing arbitrary code execution
+6. **Base Branch Detection**: Auto-detects main/master/custom branch names
 

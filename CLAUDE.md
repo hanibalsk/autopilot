@@ -154,8 +154,10 @@ CHECK_INTERVAL=60
 | `AUTOPILOT_DEBUG` | 0 | Enable debug logging to `.autopilot/tmp/debug.log` |
 | `MAX_TURNS` | 80 | Claude turns per phase |
 | `CHECK_INTERVAL` | 30 | Seconds between CI/Copilot polls |
-| `MAX_CHECK_WAIT` | 60 | Max poll iterations |
+| `MAX_CHECK_WAIT` | 60 | Max poll iterations for CI checks |
+| `MAX_COPILOT_WAIT` | 60 | Max poll iterations for Copilot review |
 | `AUTOPILOT_RUN_MOBILE_NATIVE` | 0 | Enable Gradle builds |
+| `AUTOPILOT_BASE_BRANCH` | auto | Override base branch (auto-detects main/master) |
 | `PARALLEL_MODE` | 0 | Enable parallel epic development |
 | `PARALLEL_CHECK_INTERVAL` | 60 | Seconds between pending PR checks |
 | `MAX_PENDING_PRS` | 2 | Max concurrent PRs waiting for review |
@@ -189,6 +191,36 @@ less scripts/bmad-autopilot.sh
 cat commands/autopilot.md
 ```
 
+## Security Features
+
+### Safe Config Parsing
+
+The config file parser uses a **whitelist approach** - only known configuration keys are accepted. This prevents arbitrary code execution if a malicious config file is provided:
+
+```bash
+# Only these keys are processed from config files:
+AUTOPILOT_DEBUG, MAX_TURNS, CHECK_INTERVAL, MAX_CHECK_WAIT, MAX_COPILOT_WAIT,
+AUTOPILOT_RUN_MOBILE_NATIVE, PARALLEL_MODE, PARALLEL_CHECK_INTERVAL,
+MAX_PENDING_PRS, AUTOPILOT_BASE_BRANCH
+```
+
+Unknown keys are logged with a warning and ignored.
+
+### Dirty Working Tree Check
+
+At startup, the script checks for uncommitted changes in the git working tree. If found, it warns the user and requires confirmation before proceeding, preventing accidental loss of work during branch switches.
+
+## Base Branch Detection
+
+The script auto-detects the default branch in this order:
+1. `AUTOPILOT_BASE_BRANCH` environment variable (if set)
+2. `origin/HEAD` symbolic ref
+3. Existence of `main` branch
+4. Existence of `master` branch
+5. Falls back to `main`
+
+This ensures compatibility with repositories using different default branch naming conventions.
+
 ## Design Principles
 
 1. **Zero dependencies beyond prerequisites** - pure bash, uses standard tools
@@ -196,3 +228,4 @@ cat commands/autopilot.md
 3. **Non-invasive** - installs to `.autopilot/` which is gitignored
 4. **Copilot-aware** - waits for and responds to Copilot reviews
 5. **BMAD-integrated** - uses BMAD workflows for story development
+6. **Secure** - safe config parsing, no arbitrary code execution
