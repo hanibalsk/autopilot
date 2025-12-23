@@ -19,3 +19,16 @@
 
 # Enable Gradle builds for mobile-native (requires Android toolchain)
 # AUTOPILOT_RUN_MOBILE_NATIVE=0
+
+# =============================================================================
+# PARALLEL MODE (experimental)
+# =============================================================================
+# Enable parallel execution - work on next epic while waiting for PR review
+# Uses git worktrees to manage multiple epics simultaneously
+# PARALLEL_MODE=0
+
+# Seconds between checking pending PRs status (in parallel mode)
+# PARALLEL_CHECK_INTERVAL=60
+
+# Maximum number of pending PRs before blocking new epic development
+# MAX_PENDING_PRS=2

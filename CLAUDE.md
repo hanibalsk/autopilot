@@ -36,12 +36,42 @@ autopilot/
 
 The autopilot operates as a finite state machine with phases:
 
+### Sequential Mode (default)
 ```
 CHECK_PENDING_PR → FIND_EPIC → CREATE_BRANCH → DEVELOP_STORIES →
 CODE_REVIEW → CREATE_PR → WAIT_COPILOT → WAIT_CHECKS → MERGE_PR → (loop)
                                 ↓              ↓
                            FIX_ISSUES ←────────┘
 ```
+
+### Parallel Mode (PARALLEL_MODE=1)
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ACTIVE DEVELOPMENT                    PENDING PRs (background)         │
+│  ┌───────────────────┐                 ┌─────────────────────┐         │
+│  │ FIND_EPIC         │                 │ PR #1: epic-7A      │         │
+│  │ CREATE_BRANCH     │                 │ status: WAIT_REVIEW │◄─check──┤
+│  │ DEVELOP_STORIES   │                 └─────────────────────┘         │
+│  │ CODE_REVIEW       │                 ┌─────────────────────┐         │
+│  │ CREATE_PR ────────┼──add to queue──►│ PR #2: epic-8A      │         │
+│  │      │            │                 │ status: WAIT_CI     │◄─check──┤
+│  │      ▼            │                 └─────────────────────┘         │
+│  │ FIND_EPIC (next)  │                                                  │
+│  └───────────────────┘                 If PR needs fixes:              │
+│                                        → pause active work             │
+│  If MAX_PENDING_PRS reached:           → switch to worktree            │
+│  → WAIT_PENDING_PRS                    → fix & push                    │
+│  → check periodically                  → resume active work            │
+│  → resume when slot opens                                              │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key parallel mode features:**
+- Uses `git worktree` for each pending PR
+- Periodically checks PR status during development
+- Auto-merges approved PRs
+- Pauses to fix PRs that need changes
+- Respects `MAX_PENDING_PRS` limit
 
 State persists in `.autopilot/state.json` allowing resume after interruptions.
 
@@ -126,6 +156,9 @@ CHECK_INTERVAL=60
 | `CHECK_INTERVAL` | 30 | Seconds between CI/Copilot polls |
 | `MAX_CHECK_WAIT` | 60 | Max poll iterations |
 | `AUTOPILOT_RUN_MOBILE_NATIVE` | 0 | Enable Gradle builds |
+| `PARALLEL_MODE` | 0 | Enable parallel epic development |
+| `PARALLEL_CHECK_INTERVAL` | 60 | Seconds between pending PR checks |
+| `MAX_PENDING_PRS` | 2 | Max concurrent PRs waiting for review |
 
 ### Debug Mode
 

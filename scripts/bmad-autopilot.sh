@@ -12,12 +12,20 @@
 #   ./bmad-autopilot.sh "7A" --continue           # resume with specific pattern
 #   ./bmad-autopilot.sh --debug                   # enable debug logging to .autopilot/tmp/debug.log
 #   AUTOPILOT_DEBUG=1 ./bmad-autopilot.sh        # alternative: enable debug via env var
+#   PARALLEL_MODE=1 ./bmad-autopilot.sh          # enable parallel epic development
 #
 # Branch Protection Requirements:
 #   - Copilot review triggers automatically on every push
 #   - Requires Copilot APPROVED before merge
 #   - Stale approvals are dismissed on new commits
 #   - Script waits for both CI checks AND Copilot approval
+#
+# Parallel Mode:
+#   - Work on next epic while waiting for PR review
+#   - Uses git worktree to manage multiple epics
+#   - Periodically checks pending PRs status
+#   - Auto-merges approved PRs, pauses to fix issues
+#   - Configure with PARALLEL_MODE, MAX_PENDING_PRS, PARALLEL_CHECK_INTERVAL
 #
 set -euo pipefail
 
@@ -104,11 +112,20 @@ CHECK_INTERVAL="${CHECK_INTERVAL:-30}"           # seconds between CI/Copilot po
 MAX_CHECK_WAIT="${MAX_CHECK_WAIT:-60}"           # max poll iterations
 AUTOPILOT_RUN_MOBILE_NATIVE="${AUTOPILOT_RUN_MOBILE_NATIVE:-0}"
 
+# Parallel mode configuration
+PARALLEL_MODE="${PARALLEL_MODE:-0}"              # enable parallel epic development
+PARALLEL_CHECK_INTERVAL="${PARALLEL_CHECK_INTERVAL:-60}"  # seconds between pending PR checks
+MAX_PENDING_PRS="${MAX_PENDING_PRS:-2}"          # max PRs waiting before blocking
+
+# Worktree directory for parallel mode
+WORKTREE_DIR="$AUTOPILOT_DIR/worktrees"
+
 # Initialize debug log if debug mode is enabled
 if [ "$DEBUG_MODE" = "1" ]; then
   echo "=== Debug session started: $(date '+%Y-%m-%d %H:%M:%S') ===" >> "$DEBUG_LOG"
   echo "Config file: $CONFIG_FILE (exists: $([ -f "$CONFIG_FILE" ] && echo yes || echo no))" >> "$DEBUG_LOG"
   echo "Settings: MAX_TURNS=$MAX_TURNS CHECK_INTERVAL=$CHECK_INTERVAL MAX_CHECK_WAIT=$MAX_CHECK_WAIT" >> "$DEBUG_LOG"
+  echo "Parallel mode: PARALLEL_MODE=$PARALLEL_MODE MAX_PENDING_PRS=$MAX_PENDING_PRS" >> "$DEBUG_LOG"
 fi
 
 log() {
@@ -131,9 +148,107 @@ require_tooling() {
   require_cmd rg
 }
 
+# ============================================
+# WORKTREE HELPERS (for parallel mode)
+# ============================================
+
+# Create a worktree for an epic branch
+# Usage: worktree_create "epic-7A" "feature/epic-7A"
+worktree_create() {
+  local epic_id="$1"
+  local branch_name="$2"
+  local wt_path="$WORKTREE_DIR/$epic_id"
+
+  if [ -d "$wt_path" ]; then
+    debug "Worktree already exists: $wt_path"
+    return 0
+  fi
+
+  mkdir -p "$WORKTREE_DIR"
+  log "🌳 Creating worktree for $epic_id at $wt_path"
+  git worktree add "$wt_path" "$branch_name" 2>/dev/null || {
+    # Branch might not exist yet, create from main
+    git worktree add -b "$branch_name" "$wt_path" main
+  }
+  debug "Worktree created: $wt_path"
+}
+
+# Remove a worktree
+# Usage: worktree_remove "epic-7A"
+worktree_remove() {
+  local epic_id="$1"
+  local wt_path="$WORKTREE_DIR/$epic_id"
+
+  if [ ! -d "$wt_path" ]; then
+    debug "Worktree does not exist: $wt_path"
+    return 0
+  fi
+
+  log "🗑️ Removing worktree for $epic_id"
+  git worktree remove "$wt_path" --force 2>/dev/null || true
+  debug "Worktree removed: $wt_path"
+}
+
+# Get worktree path for an epic
+# Usage: worktree_path "epic-7A"
+worktree_path() {
+  local epic_id="$1"
+  echo "$WORKTREE_DIR/$epic_id"
+}
+
+# Check if worktree exists
+# Usage: worktree_exists "epic-7A"
+worktree_exists() {
+  local epic_id="$1"
+  [ -d "$WORKTREE_DIR/$epic_id" ]
+}
+
+# Run command in worktree context
+# Usage: worktree_exec "epic-7A" "git status"
+worktree_exec() {
+  local epic_id="$1"
+  shift
+  local wt_path="$WORKTREE_DIR/$epic_id"
+
+  if [ ! -d "$wt_path" ]; then
+    log "❌ Worktree does not exist: $wt_path"
+    return 1
+  fi
+
+  (cd "$wt_path" && "$@")
+}
+
+# List all active worktrees
+worktree_list() {
+  git worktree list --porcelain | grep "^worktree " | sed 's/^worktree //'
+}
+
+# Clean up orphaned worktrees
+worktree_prune() {
+  log "🧹 Pruning orphaned worktrees..."
+  git worktree prune
+}
+
+# ============================================
+# STATE MANAGEMENT
+# ============================================
+
 state_init_if_missing() {
   if [ ! -f "$STATE_FILE" ]; then
-    echo '{"phase":"FIND_EPIC","current_epic":null,"completed_epics":[]}' >"$STATE_FILE"
+    if [ "$PARALLEL_MODE" = "1" ]; then
+      # Parallel mode state structure
+      echo '{
+        "mode": "parallel",
+        "active_epic": null,
+        "active_phase": "FIND_EPIC",
+        "active_worktree": null,
+        "pending_prs": [],
+        "completed_epics": []
+      }' | jq -c . >"$STATE_FILE"
+    else
+      # Sequential mode (legacy)
+      echo '{"phase":"FIND_EPIC","current_epic":null,"completed_epics":[]}' >"$STATE_FILE"
+    fi
   fi
 }
 
@@ -142,14 +257,23 @@ state_get() {
   cat "$STATE_FILE"
 }
 
+# Sequential mode state helpers (legacy compatibility)
 state_phase() {
   state_init_if_missing
-  jq -r '.phase' "$STATE_FILE"
+  if [ "$PARALLEL_MODE" = "1" ]; then
+    jq -r '.active_phase // .phase // "FIND_EPIC"' "$STATE_FILE"
+  else
+    jq -r '.phase' "$STATE_FILE"
+  fi
 }
 
 state_current_epic() {
   state_init_if_missing
-  jq -r '.current_epic' "$STATE_FILE"
+  if [ "$PARALLEL_MODE" = "1" ]; then
+    jq -r '.active_epic // .current_epic // "null"' "$STATE_FILE"
+  else
+    jq -r '.current_epic' "$STATE_FILE"
+  fi
 }
 
 state_completed_csv() {
@@ -161,10 +285,19 @@ state_set() {
   local phase="$1"
   local epic_json="${2:-null}" # JSON string or null
   state_init_if_missing
-  local completed
-  completed="$(jq '.completed_epics' "$STATE_FILE" 2>/dev/null || echo '[]')"
-  jq -n --arg phase "$phase" --argjson current_epic "$epic_json" --argjson completed_epics "$completed" \
-    '{phase:$phase,current_epic:$current_epic,completed_epics:$completed_epics}' >"$STATE_FILE"
+
+  if [ "$PARALLEL_MODE" = "1" ]; then
+    # Parallel mode: update active_phase and active_epic
+    jq --arg phase "$phase" --argjson epic "$epic_json" \
+      '.active_phase = $phase | .active_epic = $epic' "$STATE_FILE" >"$STATE_FILE.tmp" \
+      && mv "$STATE_FILE.tmp" "$STATE_FILE"
+  else
+    # Sequential mode (legacy)
+    local completed
+    completed="$(jq '.completed_epics' "$STATE_FILE" 2>/dev/null || echo '[]')"
+    jq -n --arg phase "$phase" --argjson current_epic "$epic_json" --argjson completed_epics "$completed" \
+      '{phase:$phase,current_epic:$current_epic,completed_epics:$completed_epics}' >"$STATE_FILE"
+  fi
 }
 
 state_mark_completed() {
@@ -172,6 +305,127 @@ state_mark_completed() {
   state_init_if_missing
   jq --arg epic "$epic" '.completed_epics += [$epic] | .completed_epics |= unique' "$STATE_FILE" >"$STATE_FILE.tmp" \
     && mv "$STATE_FILE.tmp" "$STATE_FILE"
+}
+
+# ============================================
+# PARALLEL MODE STATE HELPERS
+# ============================================
+
+# Add a PR to pending list
+# Usage: state_add_pending_pr "7A" 123 "/path/to/worktree"
+state_add_pending_pr() {
+  local epic_id="$1"
+  local pr_number="$2"
+  local wt_path="$3"
+
+  state_init_if_missing
+  local now
+  now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+  jq --arg epic "$epic_id" \
+     --argjson pr "$pr_number" \
+     --arg wt "$wt_path" \
+     --arg now "$now" \
+    '.pending_prs += [{
+      "epic": $epic,
+      "pr_number": $pr,
+      "worktree": $wt,
+      "status": "WAIT_REVIEW",
+      "last_check": $now,
+      "last_copilot_id": null
+    }]' "$STATE_FILE" >"$STATE_FILE.tmp" \
+    && mv "$STATE_FILE.tmp" "$STATE_FILE"
+
+  debug "Added pending PR: epic=$epic_id pr=#$pr_number"
+}
+
+# Update pending PR status
+# Usage: state_update_pending_pr "7A" "status" "WAIT_CI"
+state_update_pending_pr() {
+  local epic_id="$1"
+  local field="$2"
+  local value="$3"
+
+  state_init_if_missing
+  jq --arg epic "$epic_id" \
+     --arg field "$field" \
+     --arg value "$value" \
+    '(.pending_prs[] | select(.epic == $epic))[$field] = $value' "$STATE_FILE" >"$STATE_FILE.tmp" \
+    && mv "$STATE_FILE.tmp" "$STATE_FILE"
+}
+
+# Remove a PR from pending list
+# Usage: state_remove_pending_pr "7A"
+state_remove_pending_pr() {
+  local epic_id="$1"
+
+  state_init_if_missing
+  jq --arg epic "$epic_id" \
+    '.pending_prs = [.pending_prs[] | select(.epic != $epic)]' "$STATE_FILE" >"$STATE_FILE.tmp" \
+    && mv "$STATE_FILE.tmp" "$STATE_FILE"
+
+  debug "Removed pending PR: epic=$epic_id"
+}
+
+# Get pending PR info
+# Usage: state_get_pending_pr "7A"
+state_get_pending_pr() {
+  local epic_id="$1"
+  state_init_if_missing
+  jq -c --arg epic "$epic_id" '.pending_prs[] | select(.epic == $epic)' "$STATE_FILE"
+}
+
+# Get all pending PRs
+state_get_all_pending_prs() {
+  state_init_if_missing
+  jq -c '.pending_prs // []' "$STATE_FILE"
+}
+
+# Count pending PRs
+state_count_pending_prs() {
+  state_init_if_missing
+  jq '.pending_prs | length' "$STATE_FILE"
+}
+
+# Save active development state (for pause/resume)
+# Usage: state_save_active_context
+state_save_active_context() {
+  state_init_if_missing
+  local epic_id
+  epic_id="$(state_current_epic)"
+  local phase
+  phase="$(state_phase)"
+
+  if [ "$epic_id" != "null" ] && [ -n "$epic_id" ]; then
+    jq --arg epic "$epic_id" \
+       --arg phase "$phase" \
+      '.paused_context = {"epic": $epic, "phase": $phase}' "$STATE_FILE" >"$STATE_FILE.tmp" \
+      && mv "$STATE_FILE.tmp" "$STATE_FILE"
+    log "💾 Saved active context: epic=$epic_id phase=$phase"
+  fi
+}
+
+# Restore active development state
+# Usage: state_restore_active_context
+state_restore_active_context() {
+  state_init_if_missing
+  local paused
+  paused="$(jq -c '.paused_context // null' "$STATE_FILE")"
+
+  if [ "$paused" != "null" ]; then
+    local epic_id
+    epic_id="$(echo "$paused" | jq -r '.epic')"
+    local phase
+    phase="$(echo "$paused" | jq -r '.phase')"
+
+    jq '.paused_context = null' "$STATE_FILE" >"$STATE_FILE.tmp" \
+      && mv "$STATE_FILE.tmp" "$STATE_FILE"
+
+    state_set "$phase" "\"$epic_id\""
+    log "▶️ Restored active context: epic=$epic_id phase=$phase"
+    return 0
+  fi
+  return 1
 }
 
 parse_epics_from_bmad_output() {
@@ -227,10 +481,22 @@ find_next_epic() {
   local completed_csv
   completed_csv="$(state_completed_csv)"
 
+  # In parallel mode, also exclude epics that have pending PRs
+  local pending_epics=""
+  if [ "$PARALLEL_MODE" = "1" ]; then
+    pending_epics="$(jq -r '.pending_prs[].epic // empty' "$STATE_FILE" 2>/dev/null | tr '\n' ',')"
+  fi
+
   while IFS= read -r epic; do
     [ -z "$epic" ] && continue
     epic_matches_patterns "$epic" || continue
+    # Skip completed epics
     if [ -n "$completed_csv" ] && echo ",$completed_csv," | grep -q ",$epic,"; then
+      continue
+    fi
+    # Skip epics with pending PRs (parallel mode)
+    if [ -n "$pending_epics" ] && echo ",$pending_epics" | grep -q ",$epic,"; then
+      debug "Skipping epic $epic - has pending PR"
       continue
     fi
     echo "$epic"
@@ -238,6 +504,263 @@ find_next_epic() {
   done < <(parse_epics_from_bmad_output)
 
   return 1
+}
+
+# ============================================
+# PARALLEL MODE: PENDING PR MANAGEMENT
+# ============================================
+
+# Check status of a single pending PR
+# Returns: "approved", "needs_fixes", "waiting", or "merged"
+check_pending_pr_status() {
+  local epic_id="$1"
+  local pr_number="$2"
+  local wt_path="$3"
+
+  debug "Checking PR #$pr_number for epic $epic_id"
+
+  # Check if PR is still open
+  local pr_state
+  pr_state="$(gh pr view "$pr_number" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")"
+
+  if [ "$pr_state" = "MERGED" ]; then
+    echo "merged"
+    return 0
+  elif [ "$pr_state" = "CLOSED" ]; then
+    echo "closed"
+    return 0
+  elif [ "$pr_state" != "OPEN" ]; then
+    debug "PR #$pr_number state unknown: $pr_state"
+    echo "waiting"
+    return 0
+  fi
+
+  # Check CI status
+  local check_conclusions
+  check_conclusions="$(gh pr checks "$pr_number" --json conclusion -q '.[].conclusion' 2>/dev/null || echo "")"
+
+  if echo "$check_conclusions" | grep -iq "failure"; then
+    debug "PR #$pr_number has CI failures"
+    echo "needs_fixes"
+    return 0
+  fi
+
+  local ci_pending=false
+  if echo "$check_conclusions" | grep -iq "pending"; then
+    ci_pending=true
+  fi
+
+  # Check Copilot review status
+  local copilot_state
+  copilot_state="$(gh pr view "$pr_number" --json reviews -q '
+    [.reviews[] | select(.author.login | test("copilot"; "i"))] | sort_by(.submittedAt) | .[-1].state // ""
+  ' 2>/dev/null || echo "")"
+
+  if [ "$copilot_state" = "APPROVED" ] && [ "$ci_pending" = false ]; then
+    echo "approved"
+    return 0
+  elif [ "$copilot_state" = "CHANGES_REQUESTED" ]; then
+    echo "needs_fixes"
+    return 0
+  fi
+
+  # Check for actionable comments
+  local copilot_body
+  copilot_body="$(gh pr view "$pr_number" --json reviews -q '
+    [.reviews[] | select(.author.login | test("copilot"; "i"))] | sort_by(.submittedAt) | .[-1].body // ""
+  ' 2>/dev/null || echo "")"
+
+  if [ -n "$copilot_body" ] && echo "$copilot_body" | grep -qiE "suggest|issue|fix|problem|consider|warning|error|should|could|recommend"; then
+    echo "needs_fixes"
+    return 0
+  fi
+
+  echo "waiting"
+}
+
+# Check all pending PRs and take action
+# Returns: 0 if we should continue active development, 1 if we need to pause for fixes
+check_all_pending_prs() {
+  if [ "$PARALLEL_MODE" != "1" ]; then
+    return 0
+  fi
+
+  local pending_prs
+  pending_prs="$(state_get_all_pending_prs)"
+
+  if [ "$pending_prs" = "[]" ] || [ -z "$pending_prs" ]; then
+    debug "No pending PRs to check"
+    return 0
+  fi
+
+  log "🔍 Checking $(echo "$pending_prs" | jq 'length') pending PR(s)..."
+
+  local needs_attention=false
+  local pr_to_fix=""
+
+  echo "$pending_prs" | jq -c '.[]' | while read -r pr_info; do
+    local epic_id
+    epic_id="$(echo "$pr_info" | jq -r '.epic')"
+    local pr_number
+    pr_number="$(echo "$pr_info" | jq -r '.pr_number')"
+    local wt_path
+    wt_path="$(echo "$pr_info" | jq -r '.worktree')"
+
+    local status
+    status="$(check_pending_pr_status "$epic_id" "$pr_number" "$wt_path")"
+
+    case "$status" in
+      "approved")
+        log "✅ PR #$pr_number (epic $epic_id) is approved and ready to merge"
+        handle_approved_pr "$epic_id" "$pr_number" "$wt_path"
+        ;;
+      "merged")
+        log "✅ PR #$pr_number (epic $epic_id) was already merged"
+        handle_merged_pr "$epic_id" "$wt_path"
+        ;;
+      "closed")
+        log "⚠️ PR #$pr_number (epic $epic_id) was closed without merge"
+        state_remove_pending_pr "$epic_id"
+        worktree_remove "$epic_id"
+        ;;
+      "needs_fixes")
+        log "⚠️ PR #$pr_number (epic $epic_id) needs fixes"
+        # Mark that we need to pause and fix this PR
+        echo "$epic_id" > "$TMP_DIR/pr_needs_fix.txt"
+        ;;
+      "waiting")
+        debug "PR #$pr_number (epic $epic_id) still waiting for review/CI"
+        state_update_pending_pr "$epic_id" "last_check" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        ;;
+    esac
+  done
+
+  # Check if any PR needs fixes
+  if [ -f "$TMP_DIR/pr_needs_fix.txt" ]; then
+    pr_to_fix="$(cat "$TMP_DIR/pr_needs_fix.txt")"
+    rm -f "$TMP_DIR/pr_needs_fix.txt"
+    echo "$pr_to_fix"
+    return 1
+  fi
+
+  return 0
+}
+
+# Handle approved PR - merge it
+handle_approved_pr() {
+  local epic_id="$1"
+  local pr_number="$2"
+  local wt_path="$3"
+
+  log "🔀 Merging approved PR #$pr_number for epic $epic_id"
+
+  # Merge the PR
+  if gh pr merge "$pr_number" --squash --delete-branch; then
+    log "✅ PR #$pr_number merged successfully"
+    state_remove_pending_pr "$epic_id"
+    state_mark_completed "$epic_id"
+    worktree_remove "$epic_id"
+  else
+    log "❌ Failed to merge PR #$pr_number"
+    state_update_pending_pr "$epic_id" "status" "MERGE_FAILED"
+  fi
+}
+
+# Handle already merged PR - cleanup
+handle_merged_pr() {
+  local epic_id="$1"
+  local wt_path="$2"
+
+  state_remove_pending_pr "$epic_id"
+  state_mark_completed "$epic_id"
+  worktree_remove "$epic_id"
+  log "🧹 Cleaned up after merged epic $epic_id"
+}
+
+# Fix issues in a pending PR (pause active work, switch context)
+fix_pending_pr_issues() {
+  local epic_id="$1"
+
+  local pr_info
+  pr_info="$(state_get_pending_pr "$epic_id")"
+  if [ -z "$pr_info" ]; then
+    log "❌ No pending PR found for epic $epic_id"
+    return 1
+  fi
+
+  local pr_number
+  pr_number="$(echo "$pr_info" | jq -r '.pr_number')"
+  local wt_path
+  wt_path="$(echo "$pr_info" | jq -r '.worktree')"
+
+  log "🔧 Fixing issues in PR #$pr_number (epic $epic_id)"
+
+  # Save current active context
+  state_save_active_context
+
+  # Switch to the worktree and fix issues
+  if [ -d "$wt_path" ]; then
+    (
+      cd "$wt_path"
+
+      # Get CI failures
+      local ci_failures=""
+      gh pr checks "$pr_number" --json name,conclusion,detailsUrl 2>/dev/null | \
+        jq -c '[.[] | select(.conclusion == "failure")]' > "$TMP_DIR/failed-checks.json" || true
+
+      if [ -s "$TMP_DIR/failed-checks.json" ] && [ "$(cat "$TMP_DIR/failed-checks.json")" != "[]" ]; then
+        ci_failures="$(cat "$TMP_DIR/failed-checks.json")"
+      fi
+
+      # Get Copilot feedback
+      local copilot_feedback=""
+      copilot_feedback="$(gh pr view "$pr_number" --json reviews -q '
+        [.reviews[] | select(.author.login | test("copilot"; "i"))] | sort_by(.submittedAt) | .[-1].body // ""
+      ' 2>/dev/null || echo "")"
+
+      # Build issues string
+      local issues=""
+      [ -n "$copilot_feedback" ] && issues="COPILOT REVIEW:\n$copilot_feedback\n\n"
+      [ -n "$ci_failures" ] && issues="${issues}CI FAILURES:\n$ci_failures"
+
+      # Run Claude to fix issues
+      local output_file="$TMP_DIR/fix-pr-output.txt"
+      log "🤖 Running Claude to fix PR issues..."
+
+      claude -p "
+Fix ONLY issues from CI failures and/or Copilot review feedback.
+
+Issues:
+$issues
+
+Rules:
+- Do not introduce new features
+- Keep changes minimal
+- Fix each issue mentioned by Copilot
+- After fixes: git add -A && git commit -m \"fix: address ci/review\" && git push
+
+At the end, output exactly:
+STATUS: FIXED
+" --permission-mode acceptEdits \
+        --allowedTools "Bash,Read,Write,Edit,Grep" \
+        --max-turns 30 \
+        2>&1 | tee "$output_file"
+
+      log "✅ Fixes applied to PR #$pr_number"
+    )
+
+    # Update PR status
+    state_update_pending_pr "$epic_id" "status" "WAIT_REVIEW"
+    state_update_pending_pr "$epic_id" "last_check" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  else
+    log "❌ Worktree not found: $wt_path"
+    return 1
+  fi
+
+  # Restore active context
+  state_restore_active_context
+
+  return 0
 }
 
 # Run Claude headless and capture output to a file
@@ -492,15 +1015,44 @@ phase_create_pr() {
   local epic_id
   epic_id="$(state_current_epic)"
 
+  local pr_number=""
   if ! gh pr view >/dev/null 2>&1; then
     gh pr create --fill --label "epic,automated,epic-$epic_id" || gh pr create --fill
   fi
+  pr_number="$(gh pr view --json number -q '.number')"
 
   # Note: Copilot review triggers automatically on push (branch protection)
   # No need to manually request @copilot review
 
-  state_set "WAIT_COPILOT" "\"$epic_id\""
-  log "✅ PR created, Copilot review will trigger automatically on push"
+  if [ "$PARALLEL_MODE" = "1" ]; then
+    # Parallel mode: add PR to pending list and start next epic
+    local wt_path
+    wt_path="$(worktree_path "$epic_id")"
+
+    # Create worktree for this PR if not exists
+    if ! worktree_exists "$epic_id"; then
+      local branch_name="feature/epic-${epic_id}"
+      worktree_create "$epic_id" "$branch_name"
+    fi
+
+    state_add_pending_pr "$epic_id" "$pr_number" "$wt_path"
+    log "✅ PR #$pr_number created for epic $epic_id, added to pending list"
+
+    # Check if we can start another epic (respect MAX_PENDING_PRS)
+    local pending_count
+    pending_count="$(state_count_pending_prs)"
+    if [ "$pending_count" -ge "$MAX_PENDING_PRS" ]; then
+      log "📋 Reached max pending PRs ($MAX_PENDING_PRS), waiting for reviews..."
+      state_set "WAIT_PENDING_PRS" "null"
+    else
+      log "🔄 Starting next epic (parallel mode)..."
+      state_set "FIND_EPIC" "null"
+    fi
+  else
+    # Sequential mode: wait for review
+    state_set "WAIT_COPILOT" "\"$epic_id\""
+    log "✅ PR created, Copilot review will trigger automatically on push"
+  fi
 }
 
 # ============================================
@@ -814,9 +1366,68 @@ phase_merge_pr() {
   rm -f "$TMP_DIR/last_copilot_comment_id.txt" "$TMP_DIR/copilot.txt" "$TMP_DIR/copilot_latest.json" 2>/dev/null || true
 
   state_mark_completed "$epic_id"
+
+  # In parallel mode, also clean up worktree if exists
+  if [ "$PARALLEL_MODE" = "1" ]; then
+    worktree_remove "$epic_id"
+    state_remove_pending_pr "$epic_id"
+  fi
+
   # Go back to CHECK_PENDING_PR to handle any other unfinished PRs before starting new epic
   state_set "CHECK_PENDING_PR" "null"
   log "✅ Epic merged and marked completed: $epic_id"
+}
+
+# ============================================
+# PHASE: WAIT_PENDING_PRS (parallel mode only)
+# ============================================
+phase_wait_pending_prs() {
+  log "⏳ PHASE: WAIT_PENDING_PRS"
+
+  local pending_count
+  pending_count="$(state_count_pending_prs)"
+
+  if [ "$pending_count" -eq 0 ]; then
+    log "✅ No pending PRs, continuing to find next epic"
+    state_set "FIND_EPIC" "null"
+    return 0
+  fi
+
+  log "📋 Waiting for $pending_count pending PR(s) to be reviewed..."
+
+  local check_count=0
+  while true; do
+    check_count=$((check_count + 1))
+
+    # Check all pending PRs
+    local pr_to_fix=""
+    if ! pr_to_fix="$(check_all_pending_prs)"; then
+      # A PR needs fixes
+      if [ -n "$pr_to_fix" ]; then
+        log "🔧 PR for epic $pr_to_fix needs fixes, pausing to fix..."
+        fix_pending_pr_issues "$pr_to_fix"
+      fi
+    fi
+
+    # Re-check pending count after potential merges
+    pending_count="$(state_count_pending_prs)"
+
+    if [ "$pending_count" -eq 0 ]; then
+      log "✅ All pending PRs processed"
+      state_set "FIND_EPIC" "null"
+      return 0
+    fi
+
+    # Check if we can now start a new epic
+    if [ "$pending_count" -lt "$MAX_PENDING_PRS" ]; then
+      log "📋 Slot available for new epic ($pending_count/$MAX_PENDING_PRS pending)"
+      state_set "FIND_EPIC" "null"
+      return 0
+    fi
+
+    log "… Still waiting ($pending_count pending PRs, check #$check_count)"
+    sleep "$PARALLEL_CHECK_INTERVAL"
+  done
 }
 
 main() {
@@ -827,19 +1438,48 @@ main() {
     log "ℹ️ No epic pattern provided - will process ALL epics from _bmad-output/epics.md in order"
   fi
 
+  if [ "$PARALLEL_MODE" = "1" ]; then
+    log "🔀 PARALLEL MODE enabled (max $MAX_PENDING_PRS concurrent PRs)"
+    mkdir -p "$WORKTREE_DIR"
+  fi
+
   if [ "$CONTINUE_FLAG" != "--continue" ] || [ ! -f "$STATE_FILE" ]; then
     log "🚀 BMAD Autopilot starting (fresh)"
     # Start with CHECK_PENDING_PR to handle any unfinished PRs from previous runs
-    echo '{"phase":"CHECK_PENDING_PR","current_epic":null,"completed_epics":[]}' >"$STATE_FILE"
+    state_init_if_missing
+    state_set "CHECK_PENDING_PR" "null"
   else
     log "🚀 BMAD Autopilot resuming (--continue)"
     state_init_if_missing
   fi
 
+  local last_pending_check=0
+
   while true; do
     local phase
     phase="$(state_phase)"
     log "━━━ Current phase: $phase ━━━"
+
+    # In parallel mode, periodically check pending PRs during active development
+    if [ "$PARALLEL_MODE" = "1" ]; then
+      local now
+      now="$(date +%s)"
+      if [ $((now - last_pending_check)) -ge "$PARALLEL_CHECK_INTERVAL" ]; then
+        last_pending_check="$now"
+        local pending_count
+        pending_count="$(state_count_pending_prs)"
+        if [ "$pending_count" -gt 0 ]; then
+          debug "Periodic check: $pending_count pending PR(s)"
+          local pr_to_fix=""
+          if ! pr_to_fix="$(check_all_pending_prs)"; then
+            if [ -n "$pr_to_fix" ]; then
+              log "🔧 PR for epic $pr_to_fix needs fixes, pausing..."
+              fix_pending_pr_issues "$pr_to_fix"
+            fi
+          fi
+        fi
+      fi
+    fi
 
     case "$phase" in
       "CHECK_PENDING_PR")
@@ -872,6 +1512,9 @@ main() {
       "MERGE_PR")
         phase_merge_pr
         ;;
+      "WAIT_PENDING_PRS")
+        phase_wait_pending_prs
+        ;;
       "BLOCKED")
         log "⚠️ BLOCKED - manual intervention needed"
         log "Fix manually then resume with: $0 \"$EPIC_PATTERN\" --continue"
@@ -880,6 +1523,10 @@ main() {
       "DONE")
         log "🎉 ALL EPICS COMPLETED!"
         log "Completed epics: $(jq -r '.completed_epics | join(", ")' "$STATE_FILE")"
+        # Clean up worktrees in parallel mode
+        if [ "$PARALLEL_MODE" = "1" ]; then
+          worktree_prune
+        fi
         exit 0
         ;;
       *)
