@@ -626,28 +626,39 @@ check_pending_pr_status() {
     ci_pending=true
   fi
 
+  # Check for any approval (from auto-approve workflow or manual)
+  local is_approved=false
+  local approver
+  approver="$(gh pr view "$pr_number" --json reviews -q '
+    [.reviews[] | select(.state == "APPROVED")] | .[-1].author.login // ""
+  ' 2>/dev/null || echo "")"
+
+  if [ -n "$approver" ]; then
+    is_approved=true
+  fi
+
   # Check Copilot review status
   local copilot_state
   copilot_state="$(gh pr view "$pr_number" --json reviews -q '
     [.reviews[] | select(.author.login | test("copilot"; "i"))] | sort_by(.submittedAt) | .[-1].state // ""
   ' 2>/dev/null || echo "")"
 
-  if [ "$copilot_state" = "APPROVED" ] && [ "$ci_pending" = false ]; then
-    echo "approved"
-    return 0
-  elif [ "$copilot_state" = "CHANGES_REQUESTED" ]; then
+  if [ "$copilot_state" = "CHANGES_REQUESTED" ]; then
     echo "needs_fixes"
     return 0
   fi
 
-  # Check for actionable comments
-  local copilot_body
-  copilot_body="$(gh pr view "$pr_number" --json reviews -q '
-    [.reviews[] | select(.author.login | test("copilot"; "i"))] | sort_by(.submittedAt) | .[-1].body // ""
-  ' 2>/dev/null || echo "")"
-
-  if [ -n "$copilot_body" ] && echo "$copilot_body" | grep -qiE "suggest|issue|fix|problem|consider|warning|error|should|could|recommend"; then
+  # Check for unresolved review threads
+  local unresolved_count
+  unresolved_count="$(count_unresolved_threads "$pr_number")"
+  if [ "$unresolved_count" -gt 0 ]; then
     echo "needs_fixes"
+    return 0
+  fi
+
+  # Ready to merge if approved and CI passed
+  if [ "$is_approved" = true ] && [ "$ci_pending" = false ]; then
+    echo "approved"
     return 0
   fi
 
@@ -657,10 +668,6 @@ check_pending_pr_status() {
 # Check all pending PRs and take action
 # Returns: 0 if we should continue active development, 1 if we need to pause for fixes
 check_all_pending_prs() {
-  if [ "$PARALLEL_MODE" != "1" ]; then
-    return 0
-  fi
-
   local pending_prs
   pending_prs="$(state_get_all_pending_prs)"
 
@@ -1410,36 +1417,36 @@ phase_wait_copilot() {
     # Save this ID as processed
     echo "$latest_id" >"$TMP_DIR/last_copilot_comment_id.txt"
 
-    # Check if Copilot approved or found issues
-    if [ "$review_state" = "APPROVED" ]; then
-      log "✅ Copilot APPROVED the PR"
-      state_set "WAIT_CHECKS" "\"$epic_id\""
-      return 0
-    elif [ "$review_state" = "CHANGES_REQUESTED" ]; then
+    # Check if Copilot requested changes
+    if [ "$review_state" = "CHANGES_REQUESTED" ]; then
       log "⚠️ Copilot REQUESTED CHANGES"
       state_set "FIX_ISSUES" "\"$epic_id\""
       return 0
     fi
 
-    # Check for explicit "no issues" patterns first
-    if grep -qiE "no (new )?comments|no issues|looks good|lgtm|no suggestions|generated no" "$TMP_DIR/copilot.txt"; then
-      log "✅ Copilot review indicates no issues"
-      state_set "WAIT_CHECKS" "\"$epic_id\""
-      return 0
-    fi
-
-    # Check unresolved review threads (most reliable method)
+    # Check unresolved review threads
     local unresolved_count
     unresolved_count="$(count_unresolved_threads "$pr_number")"
-    if [ "$unresolved_count" -eq 0 ]; then
-      log "✅ No unresolved review threads"
-      state_set "WAIT_CHECKS" "\"$epic_id\""
-      return 0
-    else
+    if [ "$unresolved_count" -gt 0 ]; then
       log "⚠️ Found $unresolved_count unresolved review thread(s) - need to fix"
       state_set "FIX_ISSUES" "\"$epic_id\""
       return 0
     fi
+
+    # No issues! Add to pending list and continue to next epic
+    # Auto-approve workflow handles CI wait + approval + merge
+    log "✅ Copilot review complete, no issues found"
+    log "🔄 Adding PR to pending list, continuing to next epic..."
+
+    local wt_path
+    wt_path="$(worktree_path "$epic_id")"
+    state_add_pending_pr "$epic_id" "$pr_number" "$wt_path"
+
+    git checkout "$BASE_BRANCH"
+    git pull origin "$BASE_BRANCH"
+
+    state_set "FIND_EPIC" "null"
+    return 0
   done
 
   # Timeout reached
@@ -1449,96 +1456,31 @@ phase_wait_copilot() {
 }
 
 # ============================================
-# PHASE: WAIT_CHECKS
+# PHASE: WAIT_CHECKS (deprecated - redirects to FIND_EPIC)
 # ============================================
 phase_wait_checks() {
-  log "⏳ PHASE: WAIT_CHECKS"
+  log "⏳ PHASE: WAIT_CHECKS (deprecated)"
 
+  # This phase is deprecated - auto-approve workflow handles CI/approval
+  # Add current epic to pending list and continue to next epic
   local epic_id
   epic_id="$(state_current_epic)"
 
   local pr_number
-  pr_number="$(gh pr view --json number -q '.number')"
-  log "Waiting for CI checks and Copilot approval on PR #$pr_number"
+  pr_number="$(gh pr view --json number -q '.number' 2>/dev/null || echo "")"
 
-  for i in $(seq 1 "$MAX_CHECK_WAIT"); do
-    # Check CI status
-    local check_conclusions
-    check_conclusions="$(gh pr checks --json conclusion -q '.[].conclusion' 2>/dev/null || echo "")"
+  if [ -n "$pr_number" ]; then
+    local wt_path
+    wt_path="$(worktree_path "$epic_id")"
+    state_add_pending_pr "$epic_id" "$pr_number" "$wt_path"
+    log "🔄 PR #$pr_number added to pending list"
+  fi
 
-    # Failures? (case-insensitive)
-    if echo "$check_conclusions" | grep -iq "failure"; then
-      log "❌ CI checks failed"
-      gh pr checks --json name,conclusion,detailsUrl >"$TMP_DIR/failed-checks.json" || true
-      state_set "FIX_ISSUES" "\"$epic_id\""
-      return 0
-    fi
+  git checkout "$BASE_BRANCH" 2>/dev/null || true
+  git pull origin "$BASE_BRANCH" 2>/dev/null || true
 
-    # Check if CI is still pending
-    local ci_pending=false
-    if echo "$check_conclusions" | grep -iq "pending"; then
-      ci_pending=true
-    fi
-
-    # Check for any approval (from auto-approve workflow or manual)
-    # Note: Copilot only gives COMMENTED state, the auto-approve.yml workflow provides APPROVED
-    local is_approved=false
-    local approval_info
-    approval_info="$(gh pr view --json reviews -q '
-      [.reviews[] | select(.state == "APPROVED")] | .[-1] | {author: .author.login, state: .state} // {}
-    ' 2>/dev/null || echo "{}")"
-
-    local approver
-    approver="$(echo "$approval_info" | jq -r '.author // ""')"
-    if [ -n "$approver" ]; then
-      is_approved=true
-    fi
-
-    # Check if Copilot requested changes
-    local copilot_state
-    copilot_state="$(gh pr view --json reviews -q '
-      [.reviews[] | select(.author.login | test("copilot"; "i"))] | sort_by(.submittedAt) | .[-1].state // ""
-    ' 2>/dev/null || echo "")"
-
-    if [ "$copilot_state" = "CHANGES_REQUESTED" ]; then
-      log "⚠️ Copilot requested changes during WAIT_CHECKS"
-      state_set "FIX_ISSUES" "\"$epic_id\""
-      return 0
-    fi
-
-    # Check for unresolved review threads (blocks merge even if approved)
-    local unresolved_count
-    unresolved_count="$(count_unresolved_threads "$pr_number")"
-    if [ "$unresolved_count" -gt 0 ]; then
-      log "⚠️ Found $unresolved_count unresolved thread(s) - need to fix"
-      state_set "FIX_ISSUES" "\"$epic_id\""
-      return 0
-    fi
-
-    # Both CI and approval must pass
-    if [ "$ci_pending" = true ]; then
-      verbose "   Iteration $i/$MAX_CHECK_WAIT: CI pending, approved=$is_approved, waiting ${CHECK_INTERVAL}s..."
-      log "… CI checks pending ($i/$MAX_CHECK_WAIT)"
-      sleep "$CHECK_INTERVAL"
-      continue
-    fi
-
-    if [ "$is_approved" = false ]; then
-      verbose "   Iteration $i/$MAX_CHECK_WAIT: CI passed, waiting for approval (auto-approve workflow), waiting ${CHECK_INTERVAL}s..."
-      log "… Waiting for approval ($i/$MAX_CHECK_WAIT) [Copilot: $copilot_state, threads: $unresolved_count]"
-      sleep "$CHECK_INTERVAL"
-      continue
-    fi
-
-    # All checks passed AND approved
-    log "✅ All CI checks passed AND approved (by: $approver)"
-    state_set "MERGE_PR" "\"$epic_id\""
-    return 0
-  done
-
-  log "⚠️ Timeout waiting for checks/approval"
-  state_set "BLOCKED" "\"$epic_id\""
-  return 1
+  state_set "FIND_EPIC" "null"
+  log "🔄 Continuing to next epic (auto-approve handles PR in background)"
 }
 
 # ============================================
