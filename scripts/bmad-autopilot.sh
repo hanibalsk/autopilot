@@ -1078,15 +1078,9 @@ run_claude_interactive() {
   log "Starting interactive Claude session..."
   log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-  # Run Claude interactively - use script to capture output while preserving TTY
-  # This allows proper terminal interaction while still logging output
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    # macOS syntax: script -q file command...
-    script -q "$output_file" claude --permission-mode acceptEdits "$prompt"
-  else
-    # Linux syntax: script -q -c "command" file
-    script -q -c "claude --permission-mode acceptEdits \"$prompt\"" "$output_file"
-  fi
+  # Run Claude directly with -p flag for non-interactive prompt mode
+  # This works properly when called from Claude Code or other non-TTY environments
+  claude -p "$prompt" --permission-mode acceptEdits 2>&1 | tee "$output_file"
 }
 
 # ============================================
