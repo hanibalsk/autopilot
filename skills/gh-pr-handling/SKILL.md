@@ -207,6 +207,44 @@ gh api graphql -f query='
 gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="Fixed in latest commit"
 ```
 
+## Auto-Approve Workflow
+
+The `auto-approve.yml` GitHub workflow automates PR approval:
+
+**Flow:**
+1. Copilot submits review → triggers workflow
+2. Waits 2 min for CI to start
+3. Polls CI every 30s (max 30 min), fails fast on failure
+4. Checks unresolved review threads via GraphQL
+5. Auto-approves if CI passes AND 0 unresolved threads
+
+**Manual trigger (fallback):**
+```bash
+gh workflow run auto-approve.yml -f pr_number=123
+```
+
+**Check workflow status:**
+```bash
+# List recent runs
+gh run list --workflow=auto-approve.yml
+
+# Watch current run
+gh run watch
+
+# View run details
+gh run view <run-id>
+```
+
+**Why auto-approve exists:**
+- Branch protection requires approval before merge
+- Copilot review alone doesn't count as approval
+- This workflow bridges the gap: Copilot reviews → workflow approves → merge allowed
+
+**When autopilot should NOT wait:**
+- After creating PR, auto-approve workflow handles approval
+- Autopilot can continue to next epic immediately
+- Only need to wait/fix if unresolved threads exist
+
 ## Best Practices
 
 1. **Always use `--json` for scripting** - Parse structured output with `jq`
@@ -215,3 +253,4 @@ gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="Fi
 4. **Check PR state before operations** - Verify OPEN before trying to merge
 5. **Respect rate limits** - Add sleep between repeated API calls
 6. **Resolve threads after fixing** - Use GraphQL mutation to mark threads resolved
+7. **Trust auto-approve workflow** - Don't manually poll for approval, let workflow handle it
