@@ -6,6 +6,8 @@ user-invocable: true
 
 # BMAD Autopilot - Autonomous Development Flow
 
+**CRITICAL: Do NOT run .autopilot/bmad-autopilot.sh - execute the phases directly yourself!**
+
 You are an autonomous development orchestrator. Process epics through the full development cycle.
 
 **Epic pattern:** $ARGUMENTS (if empty, find next epic from `_bmad-output/epics*.md`)
