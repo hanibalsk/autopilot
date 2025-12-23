@@ -1182,22 +1182,9 @@ phase_create_pr() {
   git checkout "$BASE_BRANCH"
   git pull origin "$BASE_BRANCH"
 
-  if [ "$PARALLEL_MODE" = "1" ]; then
-    # Parallel mode: respect MAX_PENDING_PRS limit
-    local pending_count
-    pending_count="$(state_count_pending_prs)"
-    if [ "$pending_count" -ge "$MAX_PENDING_PRS" ]; then
-      log "📋 Reached max pending PRs ($MAX_PENDING_PRS), waiting for reviews..."
-      state_set "WAIT_PENDING_PRS" "null"
-    else
-      log "🔄 Starting next epic..."
-      state_set "FIND_EPIC" "null"
-    fi
-  else
-    # Sequential/auto mode: immediately start next epic, PRs monitored in background
-    log "🔄 PR created, starting next epic (PR review runs in background)..."
-    state_set "FIND_EPIC" "null"
-  fi
+  # Always auto-continue to next epic, PR reviews run in background
+  log "🔄 PR created, starting next epic (PR review runs in background)..."
+  state_set "FIND_EPIC" "null"
 }
 
 # ============================================
@@ -1639,7 +1626,7 @@ main() {
     log "ℹ️ No epic pattern provided - will process ALL epics from _bmad-output/epics.md in order"
   fi
 
-  if [ "$PARALLEL_MODE" = "1" ]; then
+  if [ "$PARALLEL_MODE" -ge 1 ] 2>/dev/null; then
     log "🔀 PARALLEL MODE enabled (max $MAX_PENDING_PRS concurrent PRs)"
     mkdir -p "$WORKTREE_DIR"
   fi
@@ -1661,22 +1648,20 @@ main() {
     phase="$(state_phase)"
     log "━━━ Current phase: $phase ━━━"
 
-    # In parallel mode, periodically check pending PRs during active development
-    if [ "$PARALLEL_MODE" = "1" ]; then
-      local now
-      now="$(date +%s)"
-      if [ $((now - last_pending_check)) -ge "$PARALLEL_CHECK_INTERVAL" ]; then
-        last_pending_check="$now"
-        local pending_count
-        pending_count="$(state_count_pending_prs)"
-        if [ "$pending_count" -gt 0 ]; then
-          debug "Periodic check: $pending_count pending PR(s)"
-          local pr_to_fix=""
-          if ! pr_to_fix="$(check_all_pending_prs)"; then
-            if [ -n "$pr_to_fix" ]; then
-              log "🔧 PR for epic $pr_to_fix needs fixes, pausing..."
-              fix_pending_pr_issues "$pr_to_fix"
-            fi
+    # Periodically check pending PRs during active development (auto-merge or fix)
+    local now
+    now="$(date +%s)"
+    if [ $((now - last_pending_check)) -ge "$PARALLEL_CHECK_INTERVAL" ]; then
+      last_pending_check="$now"
+      local pending_count
+      pending_count="$(state_count_pending_prs)"
+      if [ "$pending_count" -gt 0 ]; then
+        debug "Periodic check: $pending_count pending PR(s)"
+        local pr_to_fix=""
+        if ! pr_to_fix="$(check_all_pending_prs)"; then
+          if [ -n "$pr_to_fix" ]; then
+            log "🔧 PR for epic $pr_to_fix needs fixes, pausing..."
+            fix_pending_pr_issues "$pr_to_fix"
           fi
         fi
       fi
@@ -1724,8 +1709,8 @@ main() {
       "DONE")
         log "🎉 ALL EPICS COMPLETED!"
         log "Completed epics: $(jq -r '.completed_epics | join(", ")' "$STATE_FILE")"
-        # Clean up worktrees in parallel mode
-        if [ "$PARALLEL_MODE" = "1" ]; then
+        # Clean up worktrees if any were created
+        if [ "$PARALLEL_MODE" -ge 1 ] 2>/dev/null; then
           worktree_prune
         fi
         exit 0

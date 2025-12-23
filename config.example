@@ -32,19 +32,19 @@
 # =============================================================================
 # EXECUTION MODE
 # =============================================================================
-# PARALLEL_MODE controls how epics are processed:
+# All modes auto-continue: after creating PR, immediately start next epic.
+# PR reviews run in background, auto-merged when approved, or paused for fixes.
 #
-#   0 = Sequential auto-continue (default)
-#       - Process epics one at a time
-#       - After creating PR, immediately start next epic
-#       - PR reviews run in background, merged when ready
-#       - Simple, no worktrees needed
+# PARALLEL_MODE controls worktree usage:
 #
-#   1+ = Parallel mode (experimental)
-#       - Work on multiple epics simultaneously
-#       - Uses git worktrees to manage parallel branches
-#       - Value = max concurrent epics (e.g., PARALLEL_MODE=3)
-#       - Periodically checks pending PRs, auto-merges when approved
+#   0 = Sequential (default)
+#       - One branch at a time on main worktree
+#       - Simple, no extra worktrees needed
+#
+#   1+ = Parallel with worktrees
+#       - Uses git worktrees for parallel branch management
+#       - Value = max concurrent worktrees (e.g., PARALLEL_MODE=3)
+#       - Useful when fixes needed on multiple PRs simultaneously
 #
 # PARALLEL_MODE=0
 
