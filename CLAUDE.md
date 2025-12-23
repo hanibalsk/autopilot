@@ -56,10 +56,12 @@ State persists in `.autopilot/state.json` allowing resume after interruptions.
 - Copilot review monitoring (detects `copilot[bot]` comments/reviews)
 - CI check status polling
 
-### GitHub Copilot
-- Waits for Copilot review on every PR
-- Detects APPROVED, CHANGES_REQUESTED, or actionable comments
-- Fixes issues and loops back for re-review
+### GitHub Copilot (Branch Protection)
+- Copilot review triggers **automatically on every push** (branch protection)
+- No need to manually request `@copilot review`
+- Requires Copilot **APPROVED** before merge is allowed
+- Stale approvals are dismissed when new commits are pushed
+- Script waits for both CI checks AND Copilot approval in `WAIT_CHECKS` phase
 
 ## Development Guidelines
 

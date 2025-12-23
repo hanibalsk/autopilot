@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
 # BMAD Autopilot - Autonomous Development Orchestrator (Claude Code)
+#
 # Usage:
 #   ./bmad-autopilot.sh                           # auto-detect: process ALL epics from epics.md
 #   ./bmad-autopilot.sh "7A 8A 10B"               # specific epics only
@@ -9,6 +10,12 @@
 #   ./bmad-autopilot.sh "7.* 10.*"                # regex patterns (space-separated)
 #   ./bmad-autopilot.sh --continue                # resume previous run (all epics)
 #   ./bmad-autopilot.sh "7A" --continue           # resume with specific pattern
+#
+# Branch Protection Requirements:
+#   - Copilot review triggers automatically on every push
+#   - Requires Copilot APPROVED before merge
+#   - Stale approvals are dismissed on new commits
+#   - Script waits for both CI checks AND Copilot approval
 #
 set -euo pipefail
 
@@ -458,11 +465,11 @@ phase_create_pr() {
     gh pr create --fill --label "epic,automated,epic-$epic_id" || gh pr create --fill
   fi
 
-  # Request Copilot review with clear message
-  gh pr comment --body "Please review with GitHub Copilot. @copilot review" 2>/dev/null || true
+  # Note: Copilot review triggers automatically on push (branch protection)
+  # No need to manually request @copilot review
 
   state_set "WAIT_COPILOT" "\"$epic_id\""
-  log "✅ PR created, waiting for Copilot review"
+  log "✅ PR created, Copilot review will trigger automatically on push"
 }
 
 # ============================================
@@ -586,9 +593,10 @@ phase_wait_checks() {
 
   local pr_number
   pr_number="$(gh pr view --json number -q '.number')"
-  log "Waiting for CI checks on PR #$pr_number"
+  log "Waiting for CI checks and Copilot approval on PR #$pr_number"
 
   for i in $(seq 1 "$MAX_CHECK_WAIT"); do
+    # Check CI status
     local check_conclusions
     check_conclusions="$(gh pr checks --json conclusion -q '.[].conclusion' 2>/dev/null || echo "")"
 
@@ -600,21 +608,48 @@ phase_wait_checks() {
       return 0
     fi
 
-    # Pending? (case-insensitive)
+    # Check if CI is still pending
+    local ci_pending=false
     if echo "$check_conclusions" | grep -iq "pending"; then
+      ci_pending=true
+    fi
+
+    # Check Copilot approval status (required by branch protection)
+    local copilot_approved=false
+    local copilot_state
+    copilot_state="$(gh pr view --json reviews -q '
+      [.reviews[] | select(.author.login | test("copilot"; "i"))] | sort_by(.submittedAt) | .[-1].state // ""
+    ' 2>/dev/null || echo "")"
+
+    if [ "$copilot_state" = "APPROVED" ]; then
+      copilot_approved=true
+    elif [ "$copilot_state" = "CHANGES_REQUESTED" ]; then
+      log "⚠️ Copilot requested changes during WAIT_CHECKS"
+      state_set "FIX_ISSUES" "\"$epic_id\""
+      return 0
+    fi
+
+    # Both CI and Copilot must pass
+    if [ "$ci_pending" = true ]; then
       log "… CI checks pending ($i/$MAX_CHECK_WAIT)"
       sleep "$CHECK_INTERVAL"
       continue
     fi
 
-    # All checks passed
-    log "✅ All CI checks passed"
+    if [ "$copilot_approved" = false ]; then
+      log "… Waiting for Copilot approval ($i/$MAX_CHECK_WAIT) [current: $copilot_state]"
+      sleep "$CHECK_INTERVAL"
+      continue
+    fi
+
+    # All checks passed AND Copilot approved
+    log "✅ All CI checks passed AND Copilot approved"
     state_set "MERGE_PR" "\"$epic_id\""
     return 0
   done
 
-  log "⚠️ Timeout waiting for CI checks; proceeding to merge phase"
-  state_set "MERGE_PR" "\"$epic_id\""
+  log "⚠️ Timeout waiting for checks/approval"
+  state_set "BLOCKED" "\"$epic_id\""
 }
 
 # ============================================
