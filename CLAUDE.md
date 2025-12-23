@@ -102,6 +102,22 @@ cat ~/.claude/commands/autopilot.md
 | `CHECK_INTERVAL` | 30 | Seconds between CI/Copilot polls |
 | `MAX_CHECK_WAIT` | 60 | Max poll iterations |
 | `AUTOPILOT_RUN_MOBILE_NATIVE` | 0 | Enable Gradle builds |
+| `AUTOPILOT_DEBUG` | 0 | Enable debug logging to `.autopilot/tmp/debug.log` |
+
+## Debug Mode
+
+Enable debug mode to log detailed information to `.autopilot/tmp/debug.log`:
+
+```bash
+# Via command line flag
+./.autopilot/bmad-autopilot.sh --debug
+
+# Via environment variable
+AUTOPILOT_DEBUG=1 ./.autopilot/bmad-autopilot.sh
+
+# View debug log
+tail -f .autopilot/tmp/debug.log
+```
 
 ## Common Commands
 

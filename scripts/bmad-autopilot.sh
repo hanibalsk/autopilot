@@ -10,6 +10,8 @@
 #   ./bmad-autopilot.sh "7.* 10.*"                # regex patterns (space-separated)
 #   ./bmad-autopilot.sh --continue                # resume previous run (all epics)
 #   ./bmad-autopilot.sh "7A" --continue           # resume with specific pattern
+#   ./bmad-autopilot.sh --debug                   # enable debug logging to .autopilot/tmp/debug.log
+#   AUTOPILOT_DEBUG=1 ./bmad-autopilot.sh        # alternative: enable debug via env var
 #
 # Branch Protection Requirements:
 #   - Copilot review triggers automatically on every push
@@ -66,12 +68,15 @@ autopilot_checks() {
   fi
 }
 
-# Config - parse arguments (handle --continue as first or second arg)
+# Config - parse arguments (handle --continue and --debug as first or second arg)
 EPIC_PATTERN=""
 CONTINUE_FLAG=""
+DEBUG_MODE="${AUTOPILOT_DEBUG:-0}"
 for arg in "$@"; do
   if [ "$arg" = "--continue" ]; then
     CONTINUE_FLAG="--continue"
+  elif [ "$arg" = "--debug" ]; then
+    DEBUG_MODE="1"
   elif [ -z "$EPIC_PATTERN" ]; then
     EPIC_PATTERN="$arg"
   fi
@@ -80,6 +85,7 @@ AUTOPILOT_DIR="$ROOT_DIR/.autopilot"
 STATE_FILE="$AUTOPILOT_DIR/state.json"
 LOG_FILE="$AUTOPILOT_DIR/autopilot.log"
 TMP_DIR="$AUTOPILOT_DIR/tmp"
+DEBUG_LOG="$TMP_DIR/debug.log"
 
 MAX_TURNS="${MAX_TURNS:-80}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-30}" # seconds
@@ -87,9 +93,21 @@ MAX_CHECK_WAIT="${MAX_CHECK_WAIT:-60}" # iterations
 
 mkdir -p "$AUTOPILOT_DIR" "$TMP_DIR"
 
+# Initialize debug log if debug mode is enabled
+if [ "$DEBUG_MODE" = "1" ]; then
+  echo "=== Debug session started: $(date '+%Y-%m-%d %H:%M:%S') ===" >> "$DEBUG_LOG"
+fi
+
 log() {
   local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
   echo "$msg" | tee -a "$LOG_FILE"
+}
+
+debug() {
+  if [ "$DEBUG_MODE" = "1" ]; then
+    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] DEBUG: $1"
+    echo "$msg" >> "$DEBUG_LOG"
+  fi
 }
 
 require_tooling() {
@@ -503,10 +521,10 @@ phase_wait_copilot() {
     #
     # First, dump ALL comments and reviews for debugging (only on first iteration)
     if [ "$i" -eq 1 ]; then
-      log "DEBUG: Fetching all comments/reviews authors..."
+      debug "Fetching all comments/reviews authors..."
       gh pr view --json comments,reviews -q '
         "Comments: " + ([.comments[].author.login] | join(", ")) + " | Reviews: " + ([.reviews[] | .author.login + "(" + .state + ")"] | join(", "))
-      ' 2>/dev/null | while read -r line; do log "DEBUG: $line"; done || true
+      ' 2>/dev/null | while read -r line; do debug "$line"; done || true
     fi
 
     # We check BOTH and take the most recent one
@@ -519,7 +537,7 @@ phase_wait_copilot() {
 
     # Debug: show what we found
     if [ "$i" -eq 1 ] || [ "$((i % 10))" -eq 0 ]; then
-      log "DEBUG: copilot_latest.json = $(cat "$TMP_DIR/copilot_latest.json" | head -c 500)"
+      debug "copilot_latest.json = $(cat "$TMP_DIR/copilot_latest.json" | head -c 500)"
     fi
 
     local latest_id
