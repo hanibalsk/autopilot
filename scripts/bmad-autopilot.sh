@@ -32,6 +32,28 @@ set -euo pipefail
 ROOT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$ROOT_DIR"
 
+# Detect repository default branch (handles repos using master/main/custom)
+detect_base_branch() {
+  local b=""
+  b="$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)"
+  if [ -n "$b" ]; then
+    echo "$b"
+    return 0
+  fi
+  # Fallbacks
+  if git show-ref --verify --quiet refs/heads/main; then
+    echo "main"
+    return 0
+  fi
+  if git show-ref --verify --quiet refs/heads/master; then
+    echo "master"
+    return 0
+  fi
+  echo "main"
+}
+
+BASE_BRANCH="${AUTOPILOT_BASE_BRANCH:-$(detect_base_branch)}"
+
 # --- minimal shared helpers (embedded to avoid external dependency) ---
 require_cmd() {
   local cmd="$1"
@@ -86,10 +108,40 @@ DEBUG_LOG="$TMP_DIR/debug.log"
 
 mkdir -p "$AUTOPILOT_DIR" "$TMP_DIR"
 
-# Load config file if exists (key=value format)
+# Load config file safely (whitelist allowed keys, no arbitrary code execution)
+# Allowed config keys:
+ALLOWED_CONFIG_KEYS="AUTOPILOT_DEBUG MAX_TURNS CHECK_INTERVAL MAX_CHECK_WAIT MAX_COPILOT_WAIT AUTOPILOT_RUN_MOBILE_NATIVE PARALLEL_MODE PARALLEL_CHECK_INTERVAL MAX_PENDING_PRS AUTOPILOT_BASE_BRANCH"
+
+load_config_safely() {
+  local config_file="$1"
+  [ ! -f "$config_file" ] && return 0
+
+  while IFS='=' read -r key value || [ -n "$key" ]; do
+    # Skip comments and empty lines
+    [[ "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "$key" ]] && continue
+
+    # Trim whitespace
+    key="$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    value="$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+    # Remove quotes from value
+    value="${value#\"}"
+    value="${value%\"}"
+    value="${value#\'}"
+    value="${value%\'}"
+
+    # Only set whitelisted keys
+    if echo " $ALLOWED_CONFIG_KEYS " | grep -q " $key "; then
+      export "$key=$value"
+    else
+      echo "⚠️ Ignoring unknown config key: $key" >&2
+    fi
+  done < "$config_file"
+}
+
 if [ -f "$CONFIG_FILE" ]; then
-  # shellcheck source=/dev/null
-  source "$CONFIG_FILE"
+  load_config_safely "$CONFIG_FILE"
 fi
 
 # Config - parse arguments (handle --continue and --debug as first or second arg)
@@ -168,7 +220,7 @@ worktree_create() {
   log "🌳 Creating worktree for $epic_id at $wt_path"
   git worktree add "$wt_path" "$branch_name" 2>/dev/null || {
     # Branch might not exist yet, create from main
-    git worktree add -b "$branch_name" "$wt_path" main
+    git worktree add -b "$branch_name" "$wt_path" "$BASE_BRANCH"
   }
   debug "Worktree created: $wt_path"
 }
@@ -860,7 +912,7 @@ phase_check_pending_pr() {
       log "Branch exists but no PR - checking if we need to create one"
       # Check if there are unpushed commits
       git fetch origin "$current_branch" 2>/dev/null || true
-      if [ -n "$(git log "origin/$current_branch..HEAD" 2>/dev/null)" ] || [ -n "$(git diff origin/main..HEAD --name-only 2>/dev/null)" ]; then
+      if [ -n "$(git log "origin/$current_branch..HEAD" 2>/dev/null)" ] || [ -n "$(git diff "origin/$BASE_BRANCH..HEAD" --name-only 2>/dev/null)" ]; then
         log "Found unpushed changes - resuming from CODE_REVIEW"
         state_set "CODE_REVIEW" "\"$epic_id\""
         return 0
@@ -908,8 +960,8 @@ phase_create_branch() {
   log "Creating branch: $branch_name"
 
   git fetch origin
-  git checkout main
-  git pull origin main
+  git checkout "$BASE_BRANCH"
+  git pull origin "$BASE_BRANCH"
   git checkout -b "$branch_name" 2>/dev/null || git checkout "$branch_name"
   git push -u origin "$branch_name" 2>/dev/null || true
 
@@ -1054,9 +1106,9 @@ phase_create_pr() {
     state_add_pending_pr "$epic_id" "$pr_number" "$wt_path"
     log "✅ PR #$pr_number created for epic $epic_id, added to pending list"
 
-    # Switch back to main for next epic
-    git checkout main
-    git pull origin main
+    # Switch back to base branch for next epic
+    git checkout "$BASE_BRANCH"
+    git pull origin "$BASE_BRANCH"
 
     # Check if we can start another epic (respect MAX_PENDING_PRS)
     local pending_count
@@ -1124,7 +1176,8 @@ phase_wait_copilot() {
     gh pr view --json comments,reviews -q '
       (
         [.comments[] | select(.author.login | test("copilot"; "i")) | {id: .id, body: .body, createdAt: .createdAt, type: "comment", author: .author.login}] +
-        [.reviews[] | select(.author.login | test("copilot"; "i")) | {id: .id, body: .body, createdAt: .createdAt, type: "review", state: .state, author: .author.login}]
+        # Reviews use submittedAt; normalize to createdAt for consistent sorting
+        [.reviews[] | select(.author.login | test("copilot"; "i")) | {id: .id, body: .body, createdAt: (.submittedAt // .createdAt // .updatedAt), type: "review", state: .state, author: .author.login}]
       ) | sort_by(.createdAt) | .[-1] // {}
     ' >"$TMP_DIR/copilot_latest.json" 2>/dev/null || echo "{}" >"$TMP_DIR/copilot_latest.json"
 
@@ -1389,8 +1442,8 @@ phase_merge_pr() {
 
   gh pr merge --squash --delete-branch
 
-  git checkout main
-  git pull origin main
+  git checkout "$BASE_BRANCH"
+  git pull origin "$BASE_BRANCH"
 
   log "Running post-merge checks..."
   autopilot_checks
@@ -1465,6 +1518,21 @@ phase_wait_pending_prs() {
 
 main() {
   require_tooling
+
+  # Safety check: warn if working tree is dirty (uncommitted changes)
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    log "⚠️ WARNING: Git working tree has uncommitted changes"
+    log "   Autopilot may checkout branches which could cause conflicts."
+    log "   Consider committing or stashing your changes first."
+    echo ""
+    read -p "Continue anyway? [y/N] " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      log "Aborted by user."
+      exit 1
+    fi
+    log "Continuing with dirty working tree (user confirmed)..."
+  fi
 
   # If no pattern provided, auto-detect mode (process all epics in order)
   if [ -z "$EPIC_PATTERN" ]; then

@@ -17,8 +17,14 @@
 # Maximum poll iterations before timeout
 # MAX_CHECK_WAIT=60
 
+# Maximum iterations waiting for Copilot review (defaults to MAX_CHECK_WAIT)
+# MAX_COPILOT_WAIT=60
+
 # Enable Gradle builds for mobile-native (requires Android toolchain)
 # AUTOPILOT_RUN_MOBILE_NATIVE=0
+
+# Override default branch detection (auto-detected from origin/HEAD, main, or master)
+# AUTOPILOT_BASE_BRANCH=main
 
 # =============================================================================
 # PARALLEL MODE (experimental)

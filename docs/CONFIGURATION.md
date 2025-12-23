@@ -131,10 +131,10 @@ Default labels: `epic`, `automated`, `epic-{ID}`
 
 ### Copilot Review
 
-The autopilot requests Copilot review with:
+Copilot review is typically triggered automatically by branch protection on push.
 
 ```
-Please review with GitHub Copilot. @copilot review
+(If needed) request a review manually in the PR UI or via GitHub settings/automation.
 ```
 
 ## State Management
