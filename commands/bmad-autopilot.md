@@ -1,6 +1,7 @@
 ---
 description: Run BMAD Autopilot - Autonomous Development Flow (multi-epic state machine)
 allowed-tools: Bash,Read,Write,Edit,Grep
+user-invocable: true
 ---
 
 # BMAD Autopilot - Autonomous Development Flow

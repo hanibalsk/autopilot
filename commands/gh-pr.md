@@ -1,6 +1,7 @@
 ---
 description: GitHub CLI and PR handling reference
 allowed-tools: Bash, Read
+user-invocable: true
 ---
 
 # GitHub CLI & PR Handling

@@ -1,6 +1,7 @@
 ---
 description: Run BMAD Autopilot orchestrator (alias)
 allowed-tools: Bash
+user-invocable: true
 ---
 
 Run the BMAD Autopilot orchestrator.
