@@ -795,6 +795,55 @@ count_unresolved_threads() {
   echo "${count:-0}"
 }
 
+# Get unresolved review threads content for Claude to fix
+# Returns formatted text with file path, line, and comment
+get_unresolved_threads_content() {
+  local pr_number="$1"
+
+  local repo_info
+  repo_info="$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"' 2>/dev/null || echo "")"
+
+  if [ -z "$repo_info" ]; then
+    echo ""
+    return 0
+  fi
+
+  local owner="${repo_info%%/*}"
+  local repo="${repo_info##*/}"
+
+  gh api graphql -f query='
+    query($owner: String!, $repo: String!, $pr: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $pr) {
+          reviewThreads(first: 100) {
+            nodes {
+              isResolved
+              path
+              line
+              comments(first: 10) {
+                nodes {
+                  body
+                  author { login }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ' -F owner="$owner" -F repo="$repo" -F pr="$pr_number" \
+    --jq '
+      [.data.repository.pullRequest.reviewThreads.nodes[]
+       | select(.isResolved == false)
+       | {
+           file: .path,
+           line: .line,
+           comments: [.comments.nodes[] | "\(.author.login): \(.body)"] | join("\n")
+         }
+      ] | .[] | "📁 File: \(.file):\(.line)\n\(.comments)\n---"
+    ' 2>/dev/null || echo ""
+}
+
 # Resolve all unresolved review threads on a PR
 # Uses GitHub GraphQL API to mark threads as resolved
 resolve_pr_review_threads() {
@@ -1495,15 +1544,30 @@ phase_fix_issues() {
   local pr_number
   pr_number="$(gh pr view --json number -q '.number')"
 
+  # Fetch unresolved review threads with their content
+  log "🔍 Fetching unresolved review threads..."
+  local threads_content=""
+  threads_content="$(get_unresolved_threads_content "$pr_number")"
+
   # Build issues string with proper newlines
   local issues=""
   local has_copilot_issues=false
   local copilot_feedback=""
-  if [ -f "$TMP_DIR/copilot.txt" ] && [ -s "$TMP_DIR/copilot.txt" ]; then
-    copilot_feedback="$(cat "$TMP_DIR/copilot.txt")"
-    issues=$(printf "%s\n\nCOPILOT REVIEW:\n%s" "$issues" "$copilot_feedback")
+
+  # Add unresolved threads (most important - these block merge)
+  if [ -n "$threads_content" ] && [ "$threads_content" != "[]" ]; then
+    issues=$(printf "%s\n\nUNRESOLVED REVIEW THREADS:\n%s" "$issues" "$threads_content")
     has_copilot_issues=true
   fi
+
+  # Add Copilot review body if available
+  if [ -f "$TMP_DIR/copilot.txt" ] && [ -s "$TMP_DIR/copilot.txt" ]; then
+    copilot_feedback="$(cat "$TMP_DIR/copilot.txt")"
+    issues=$(printf "%s\n\nCOPILOT REVIEW BODY:\n%s" "$issues" "$copilot_feedback")
+    has_copilot_issues=true
+  fi
+
+  # Add CI failures
   if [ -f "$TMP_DIR/failed-checks.json" ] && [ -s "$TMP_DIR/failed-checks.json" ]; then
     issues=$(printf "%s\n\nCI FAILURES:\n%s" "$issues" "$(cat "$TMP_DIR/failed-checks.json")")
   fi
@@ -1583,10 +1647,11 @@ $reply_text"
     # Post the reply
     gh pr comment "$pr_number" --body "$reply_text" 2>/dev/null || true
     log "✅ Posted detailed reply to Copilot review"
-
-    # Resolve review threads after addressing feedback
-    resolve_pr_review_threads "$pr_number"
   fi
+
+  # ALWAYS resolve review threads after addressing feedback
+  log "🔧 Resolving review threads..."
+  resolve_pr_review_threads "$pr_number"
 
   rm -f "$TMP_DIR/failed-checks.json" 2>/dev/null || true
   # Note: keeping copilot.txt for reference, but we track by comment ID now
