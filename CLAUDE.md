@@ -11,8 +11,9 @@ BMAD Autopilot is an **installable autonomous development orchestrator** for Cla
 When a user runs `./install.sh /path/to/target`:
 
 1. **Main script** → `{target}/.autopilot/bmad-autopilot.sh`
-2. **Claude commands** (optional) → `{target}/.claude/commands/*.md` (project-local, not global)
-3. **gitignore entry** → `.autopilot/` added to target's `.gitignore`
+2. **Config example** → `{target}/.autopilot/config.example`
+3. **Claude commands** (optional) → `{target}/.claude/commands/*.md` (project-local, not global)
+4. **gitignore entry** → `.autopilot/` added to target's `.gitignore`
 
 ## Repository Structure
 
@@ -94,19 +95,39 @@ cat ~/.claude/commands/autopilot.md
 3. Update state transitions with `state_set "NEW_PHASE" "\"$epic_id\""`
 4. Document in `docs/ARCHITECTURE.md`
 
-## Environment Variables
+## Configuration
+
+Settings can be configured via (in order of priority):
+1. **Command line flags** (`--debug`)
+2. **Environment variables** (`AUTOPILOT_DEBUG=1`)
+3. **Config file** (`.autopilot/config`)
+
+### Config File
+
+Copy `config.example` to `.autopilot/config` and customize:
+
+```bash
+cp .autopilot/config.example .autopilot/config
+```
+
+Example `.autopilot/config`:
+```bash
+AUTOPILOT_DEBUG=1
+MAX_TURNS=100
+CHECK_INTERVAL=60
+```
+
+### Available Settings
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `AUTOPILOT_DEBUG` | 0 | Enable debug logging to `.autopilot/tmp/debug.log` |
 | `MAX_TURNS` | 80 | Claude turns per phase |
 | `CHECK_INTERVAL` | 30 | Seconds between CI/Copilot polls |
 | `MAX_CHECK_WAIT` | 60 | Max poll iterations |
 | `AUTOPILOT_RUN_MOBILE_NATIVE` | 0 | Enable Gradle builds |
-| `AUTOPILOT_DEBUG` | 0 | Enable debug logging to `.autopilot/tmp/debug.log` |
 
-## Debug Mode
-
-Enable debug mode to log detailed information to `.autopilot/tmp/debug.log`:
+### Debug Mode
 
 ```bash
 # Via command line flag
@@ -114,6 +135,9 @@ Enable debug mode to log detailed information to `.autopilot/tmp/debug.log`:
 
 # Via environment variable
 AUTOPILOT_DEBUG=1 ./.autopilot/bmad-autopilot.sh
+
+# Via config file
+echo "AUTOPILOT_DEBUG=1" >> .autopilot/config
 
 # View debug log
 tail -f .autopilot/tmp/debug.log

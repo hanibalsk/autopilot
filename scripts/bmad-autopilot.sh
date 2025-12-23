@@ -68,6 +68,22 @@ autopilot_checks() {
   fi
 }
 
+# Paths
+AUTOPILOT_DIR="$ROOT_DIR/.autopilot"
+CONFIG_FILE="$AUTOPILOT_DIR/config"
+STATE_FILE="$AUTOPILOT_DIR/state.json"
+LOG_FILE="$AUTOPILOT_DIR/autopilot.log"
+TMP_DIR="$AUTOPILOT_DIR/tmp"
+DEBUG_LOG="$TMP_DIR/debug.log"
+
+mkdir -p "$AUTOPILOT_DIR" "$TMP_DIR"
+
+# Load config file if exists (key=value format)
+if [ -f "$CONFIG_FILE" ]; then
+  # shellcheck source=/dev/null
+  source "$CONFIG_FILE"
+fi
+
 # Config - parse arguments (handle --continue and --debug as first or second arg)
 EPIC_PATTERN=""
 CONTINUE_FLAG=""
@@ -81,21 +97,18 @@ for arg in "$@"; do
     EPIC_PATTERN="$arg"
   fi
 done
-AUTOPILOT_DIR="$ROOT_DIR/.autopilot"
-STATE_FILE="$AUTOPILOT_DIR/state.json"
-LOG_FILE="$AUTOPILOT_DIR/autopilot.log"
-TMP_DIR="$AUTOPILOT_DIR/tmp"
-DEBUG_LOG="$TMP_DIR/debug.log"
 
+# Configuration with defaults (env vars override config file)
 MAX_TURNS="${MAX_TURNS:-80}"
-CHECK_INTERVAL="${CHECK_INTERVAL:-30}" # seconds
-MAX_CHECK_WAIT="${MAX_CHECK_WAIT:-60}" # iterations
-
-mkdir -p "$AUTOPILOT_DIR" "$TMP_DIR"
+CHECK_INTERVAL="${CHECK_INTERVAL:-30}"           # seconds between CI/Copilot polls
+MAX_CHECK_WAIT="${MAX_CHECK_WAIT:-60}"           # max poll iterations
+AUTOPILOT_RUN_MOBILE_NATIVE="${AUTOPILOT_RUN_MOBILE_NATIVE:-0}"
 
 # Initialize debug log if debug mode is enabled
 if [ "$DEBUG_MODE" = "1" ]; then
   echo "=== Debug session started: $(date '+%Y-%m-%d %H:%M:%S') ===" >> "$DEBUG_LOG"
+  echo "Config file: $CONFIG_FILE (exists: $([ -f "$CONFIG_FILE" ] && echo yes || echo no))" >> "$DEBUG_LOG"
+  echo "Settings: MAX_TURNS=$MAX_TURNS CHECK_INTERVAL=$CHECK_INTERVAL MAX_CHECK_WAIT=$MAX_CHECK_WAIT" >> "$DEBUG_LOG"
 fi
 
 log() {

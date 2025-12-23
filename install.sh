@@ -33,12 +33,14 @@ fi
 echo "✅ All prerequisites found"
 echo ""
 
-# Install main script
+# Install main script and config example
 echo "📁 Installing to: $TARGET_DIR/.autopilot/"
 mkdir -p "$TARGET_DIR/.autopilot"
 cp "$SCRIPT_DIR/scripts/bmad-autopilot.sh" "$TARGET_DIR/.autopilot/"
 chmod +x "$TARGET_DIR/.autopilot/bmad-autopilot.sh"
+cp "$SCRIPT_DIR/config.example" "$TARGET_DIR/.autopilot/config.example"
 echo "✅ Main script installed"
+echo "✅ Config example installed (copy to 'config' to customize)"
 
 # Install Claude commands to project-local .claude/commands
 echo ""
