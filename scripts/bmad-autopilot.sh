@@ -537,6 +537,7 @@ parse_epics_from_bmad_output() {
     | sed -E 's/^#{2,4} Epic ([^:]+):.*/\1/' \
     | tr -d '\r' \
     | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' \
+    | grep -v -i 'complete\|summary\|overview\|done' \
     | sort -u
 }
 
