@@ -755,6 +755,39 @@ handle_merged_pr() {
   log "🧹 Cleaned up after merged epic $epic_id"
 }
 
+# Count unresolved review threads on a PR
+# Returns the count (0 if none or on error)
+count_unresolved_threads() {
+  local pr_number="$1"
+
+  local repo_info
+  repo_info="$(gh repo view --json owner,name -q '"\(.owner.login)/\(.name)"' 2>/dev/null || echo "")"
+
+  if [ -z "$repo_info" ]; then
+    echo "0"
+    return 0
+  fi
+
+  local owner="${repo_info%%/*}"
+  local repo="${repo_info##*/}"
+
+  local count
+  count="$(gh api graphql -f query='
+    query($owner: String!, $repo: String!, $pr: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $pr) {
+          reviewThreads(first: 100) {
+            nodes { isResolved }
+          }
+        }
+      }
+    }
+  ' -F owner="$owner" -F repo="$repo" -F pr="$pr_number" \
+    --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' 2>/dev/null || echo "0")"
+
+  echo "${count:-0}"
+}
+
 # Resolve all unresolved review threads on a PR
 # Uses GitHub GraphQL API to mark threads as resolved
 resolve_pr_review_threads() {
@@ -1388,14 +1421,23 @@ phase_wait_copilot() {
       return 0
     fi
 
-    # For comments or COMMENTED reviews, check content for actionable items
-    if grep -qiE "suggest|issue|fix|problem|consider|warning|error|should|could|recommend|nit|improvement|change|update|missing|add|remove" "$TMP_DIR/copilot.txt"; then
-      log "⚠️ Copilot review has actionable suggestions - need to fix"
-      state_set "FIX_ISSUES" "\"$epic_id\""
+    # Check for explicit "no issues" patterns first
+    if grep -qiE "no (new )?comments|no issues|looks good|lgtm|no suggestions|generated no" "$TMP_DIR/copilot.txt"; then
+      log "✅ Copilot review indicates no issues"
+      state_set "WAIT_CHECKS" "\"$epic_id\""
+      return 0
+    fi
+
+    # Check unresolved review threads (most reliable method)
+    local unresolved_count
+    unresolved_count="$(count_unresolved_threads "$pr_number")"
+    if [ "$unresolved_count" -eq 0 ]; then
+      log "✅ No unresolved review threads"
+      state_set "WAIT_CHECKS" "\"$epic_id\""
       return 0
     else
-      log "✅ Copilot review has no actionable issues"
-      state_set "WAIT_CHECKS" "\"$epic_id\""
+      log "⚠️ Found $unresolved_count unresolved review thread(s) - need to fix"
+      state_set "FIX_ISSUES" "\"$epic_id\""
       return 0
     fi
   done
