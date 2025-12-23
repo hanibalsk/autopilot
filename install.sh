@@ -82,7 +82,22 @@ cp "$SCRIPT_DIR/scripts/bmad-autopilot.sh" "$TARGET_DIR/.autopilot/"
 chmod +x "$TARGET_DIR/.autopilot/bmad-autopilot.sh"
 cp "$SCRIPT_DIR/config.example" "$TARGET_DIR/.autopilot/config.example"
 echo "✅ Main script installed"
-echo "✅ Config example installed (copy to 'config' to customize)"
+echo "✅ Config example installed"
+
+# Ask about installing active config
+echo ""
+if [ -f "$TARGET_DIR/.autopilot/config" ]; then
+  echo "ℹ️  Config file already exists at $TARGET_DIR/.autopilot/config"
+else
+  read -p "⚙️  Create config file from example? [y/N] " -n 1 -r
+  echo ""
+  if [[ $REPLY =~ ^[Yy]$ ]]; then
+    cp "$SCRIPT_DIR/config.example" "$TARGET_DIR/.autopilot/config"
+    echo "✅ Config file created (edit .autopilot/config to customize)"
+  else
+    echo "⏭️  Skipped config (copy config.example to config when ready)"
+  fi
+fi
 
 # Install Claude commands to project-local .claude/commands
 echo ""
