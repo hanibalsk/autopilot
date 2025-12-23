@@ -99,14 +99,45 @@ else
   fi
 fi
 
-# Install Claude commands to project-local .claude/commands
+# Install Claude commands
 echo ""
-read -p "📦 Install Claude Code commands to $TARGET_DIR/.claude/commands? [y/N] " -n 1 -r
+read -p "📦 Install Claude Code commands? [y/N] " -n 1 -r
 echo ""
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-  mkdir -p "$TARGET_DIR/.claude/commands"
-  cp "$SCRIPT_DIR/commands/"*.md "$TARGET_DIR/.claude/commands/"
-  echo "✅ Claude commands installed to .claude/commands/"
+  # Detect previous installation location
+  COMMANDS_LOCATION=""
+  if [ -f "$TARGET_DIR/.claude/commands/autopilot.md" ]; then
+    COMMANDS_LOCATION="local"
+  elif [ -f "$HOME/.claude/commands/autopilot.md" ]; then
+    COMMANDS_LOCATION="global"
+  fi
+
+  if [ -n "$COMMANDS_LOCATION" ]; then
+    echo "ℹ️  Previous installation detected: $COMMANDS_LOCATION"
+    if [ "$COMMANDS_LOCATION" = "local" ]; then
+      COMMANDS_DIR="$TARGET_DIR/.claude/commands"
+    else
+      COMMANDS_DIR="$HOME/.claude/commands"
+    fi
+  else
+    echo ""
+    echo "Where to install commands?"
+    echo "  1) Local  - $TARGET_DIR/.claude/commands (recommended)"
+    echo "  2) Global - ~/.claude/commands"
+    read -p "Choose [1/2] (default: 1): " -n 1 -r
+    echo ""
+    if [[ $REPLY = "2" ]]; then
+      COMMANDS_DIR="$HOME/.claude/commands"
+      echo "Installing to global ~/.claude/commands/"
+    else
+      COMMANDS_DIR="$TARGET_DIR/.claude/commands"
+      echo "Installing to local .claude/commands/"
+    fi
+  fi
+
+  mkdir -p "$COMMANDS_DIR"
+  cp "$SCRIPT_DIR/commands/"*.md "$COMMANDS_DIR/"
+  echo "✅ Claude commands installed to $COMMANDS_DIR/"
 else
   echo "⏭️  Skipped Claude commands"
 fi
