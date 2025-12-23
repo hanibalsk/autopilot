@@ -1,5 +1,5 @@
 ---
-name: bmad-autopilot
+name: bmad-autopilot-skill
 description: Autonomous development orchestrator for processing epics. Use when the user wants to run the autopilot, process epics, or automate the development workflow with BMAD method.
 allowed-tools: Bash, Read
 ---
