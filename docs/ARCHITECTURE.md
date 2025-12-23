@@ -10,39 +10,35 @@ BMAD Autopilot is a state-machine-driven bash orchestrator that automates the en
 
 The autopilot operates as a finite state machine with the following states:
 
-#### Sequential Mode (default)
-```
-CHECK_PENDING_PR → FIND_EPIC → CREATE_BRANCH → DEVELOP_STORIES →
-CODE_REVIEW → CREATE_PR → WAIT_COPILOT → WAIT_CHECKS → MERGE_PR → (loop)
-                                ↓              ↓
-                           FIX_ISSUES ←────────┘
-                                ↓
-                           WAIT_COPILOT (re-review)
-```
-
-#### Parallel Mode (PARALLEL_MODE=1)
+#### Non-Blocking Flow (all modes)
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  ACTIVE DEVELOPMENT                    PENDING PRs (background)         │
+│  ACTIVE DEVELOPMENT                    BACKGROUND (auto-approve)        │
 │  ┌───────────────────┐                 ┌─────────────────────┐         │
-│  │ FIND_EPIC         │                 │ PR #1: epic-7A      │         │
-│  │ CREATE_BRANCH     │                 │ status: WAIT_REVIEW │◄─check──┤
-│  │ DEVELOP_STORIES   │                 └─────────────────────┘         │
-│  │ CODE_REVIEW       │                 ┌─────────────────────┐         │
-│  │ CREATE_PR ────────┼──add to queue──►│ PR #2: epic-8A      │         │
-│  │      │            │                 │ status: WAIT_CI     │◄─check──┤
-│  │      ▼            │                 └─────────────────────┘         │
-│  │ FIND_EPIC (next)  │                                                  │
-│  └───────────────────┘                 If PR needs fixes:              │
-│                                        → pause active work             │
-│  If MAX_PENDING_PRS reached:           → switch to worktree            │
-│  → WAIT_PENDING_PRS                    → fix & push                    │
-│  → check periodically                  → resume active work            │
-│  → resume when slot opens                                              │
+│  │ FIND_EPIC         │                 │ auto-approve.yml    │         │
+│  │ CREATE_BRANCH     │                 │ - wait 10min        │         │
+│  │ DEVELOP_STORIES   │ (interactive)   │ - check CI passed   │         │
+│  │ CODE_REVIEW       │ (interactive)   │ - check threads=0   │         │
+│  │ CREATE_PR ────────┼──add to queue──►│ - approve PR        │         │
+│  │      │            │                 └─────────────────────┘         │
+│  │      ▼            │                                                  │
+│  │ WAIT_COPILOT      │                 ┌─────────────────────┐         │
+│  │      │            │                 │ Pending PRs         │         │
+│  │ if no issues:     │                 │ - checked every 60s │◄─check──┤
+│  │      ▼            │                 │ - auto-merged       │         │
+│  │ FIND_EPIC (next)  │                 │ - or fix issues     │         │
+│  └───────────────────┘                 └─────────────────────┘         │
+│                                                                         │
+│  if unresolved threads:                                                 │
+│  → FIX_ISSUES (fetch threads, fix, reply, resolve)                     │
+│  → WAIT_COPILOT (re-review)                                            │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-Parallel mode uses `git worktree` to manage multiple concurrent branches.
+**Key principle:** Never block waiting for approval. Continue to next epic immediately.
+
+- `PARALLEL_MODE=0`: One branch at a time (simple)
+- `PARALLEL_MODE=1+`: Uses git worktrees for parallel branch management
 
 ### 2. State Persistence
 
@@ -138,12 +134,54 @@ Handles:
 
 ### FIX_ISSUES
 
-Collects all issues and sends to Claude:
+Comprehensive issue resolution with thread management:
 
-- Copilot feedback from review
-- CI failure details
+1. **Fetch unresolved threads** via GraphQL:
+   ```bash
+   gh api graphql -f query='...' --jq '.reviewThreads.nodes[]'
+   ```
+   Gets file path, line number, and comment content.
 
-Claude fixes issues and generates a structured reply table.
+2. **Send to Claude** with full context:
+   - Unresolved thread content (file:line + comment)
+   - Copilot review body
+   - CI failure details
+
+3. **Claude fixes issues** and commits
+
+4. **Post reply** to PR acknowledging feedback
+
+5. **Resolve all threads** via GraphQL mutation:
+   ```bash
+   gh api graphql -f query='mutation { resolveReviewThread(...) }'
+   ```
+
+6. **Return to WAIT_COPILOT** for re-review
+
+**Critical:** Always reply AND resolve threads - both are required for auto-approve.
+
+### Auto-Approve Workflow
+
+The `auto-approve.yml` GitHub Actions workflow handles PR approval:
+
+**Trigger:** Copilot submits a review (`pull_request_review: submitted`)
+
+**Approval conditions (ALL must be met):**
+1. At least 10 minutes since last push
+2. Copilot review exists
+3. All review threads resolved (0 unresolved)
+4. All CI checks passed
+
+**Flow:**
+1. Wait 2 min for CI to start
+2. Poll CI every 30s until complete
+3. Check time since last push (≥10 min)
+4. Check Copilot has reviewed
+5. Check 0 unresolved threads via GraphQL
+6. **Dismiss stale approvals** if unresolved threads exist
+7. Approve if all conditions met
+
+**Stale approval dismissal:** If conditions aren't met but a previous approval exists, it's dismissed to prevent merging with unresolved issues.
 
 ### MERGE_PR
 

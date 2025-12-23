@@ -104,14 +104,16 @@ If you installed the Claude Code commands:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  INIT -> CHECK_PENDING_PR -> FIND_EPIC -> CREATE_BRANCH ->     │
+│  CHECK_PENDING_PR -> FIND_EPIC -> CREATE_BRANCH ->              │
 │  DEVELOP_STORIES -> CODE_REVIEW -> CREATE_PR ->                 │
-│  WAIT_COPILOT -> WAIT_CHECKS -> MERGE_PR -> (loop) -> DONE     │
-│       │              │                                          │
-│       ▼              ▼                                          │
-│  FIX_ISSUES ◄────────┴─── (fix Copilot comments + CI failures) │
+│  WAIT_COPILOT -> (add to pending) -> FIND_EPIC (next epic)     │
+│       │                                                         │
+│       ▼                                                         │
+│  FIX_ISSUES ◄─── (if unresolved threads exist)                 │
 │       │                                                         │
 │       └──────► WAIT_COPILOT (re-review after fixes)            │
+│                                                                 │
+│  Background: pending PRs auto-merged when approved              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -122,15 +124,38 @@ If you installed the Claude Code commands:
 | `CHECK_PENDING_PR` | Look for unfinished PRs from previous runs |
 | `FIND_EPIC` | Find next epic from `_bmad-output/epics*.md` |
 | `CREATE_BRANCH` | Create `feature/epic-{ID}` branch |
-| `DEVELOP_STORIES` | Run BMAD dev-story workflow via Claude |
-| `CODE_REVIEW` | Run BMAD code-review workflow, fix issues |
-| `CREATE_PR` | Create PR, request Copilot review |
-| `WAIT_COPILOT` | Wait for Copilot to comment (it always does) |
-| `WAIT_CHECKS` | Wait for CI checks to pass |
-| `FIX_ISSUES` | Fix Copilot/CI issues, post reply, loop back |
+| `DEVELOP_STORIES` | Run BMAD dev-story workflow via Claude (interactive) |
+| `CODE_REVIEW` | Run BMAD code-review workflow, fix issues (interactive) |
+| `CREATE_PR` | Create PR, add to pending list, continue to next epic |
+| `WAIT_COPILOT` | Check Copilot review - if no issues, continue to next epic |
+| `FIX_ISSUES` | Fix issues, post reply, resolve threads, loop back |
 | `MERGE_PR` | Squash merge, delete branch, mark complete |
 | `DONE` | All epics processed! |
 | `BLOCKED` | Manual intervention needed |
+
+### Auto-Approve Workflow
+
+The `auto-approve.yml` GitHub workflow handles PR approval automatically:
+
+**Approval conditions (ALL must be met):**
+1. At least 10 minutes since last push
+2. Copilot review exists
+3. All review threads resolved
+4. All CI checks passed
+
+**Features:**
+- Dismisses stale approvals if unresolved threads exist
+- Autopilot continues to next epic immediately after PR creation
+- Pending PRs are monitored and auto-merged when approved
+
+### FIX_ISSUES Phase
+
+When Copilot has review comments:
+1. Fetches unresolved thread content (file, line, comment) via GraphQL
+2. Claude fixes the issues
+3. Posts reply to PR acknowledging feedback
+4. Resolves all threads via GraphQL mutation
+5. Pushes fixes → Copilot re-reviews → auto-approve triggers
 
 ## Configuration
 
@@ -159,15 +184,18 @@ Settings can be configured via (in order of priority):
 | `AUTOPILOT_RUN_MOBILE_NATIVE` | `0` | Set to `1` to run Gradle builds |
 | `AUTOPILOT_BASE_BRANCH` | auto | Override base branch (auto-detects main/master) |
 
-### Parallel Mode (Experimental)
+### Execution Mode
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PARALLEL_MODE` | `0` | Enable parallel epic development |
+| `PARALLEL_MODE` | `0` | `0` = sequential, `1+` = use git worktrees |
 | `PARALLEL_CHECK_INTERVAL` | `60` | Seconds between pending PR checks |
-| `MAX_PENDING_PRS` | `2` | Max concurrent PRs waiting for review |
+| `MAX_PENDING_PRS` | `2` | Max concurrent PRs in pending list |
 
-When enabled, the autopilot will start working on the next epic while PRs are waiting for review. Uses git worktrees to manage multiple concurrent branches.
+**All modes auto-continue:** After creating a PR, the autopilot immediately continues to the next epic. PR reviews run in background and are auto-merged when approved.
+
+- `PARALLEL_MODE=0`: One branch at a time on main worktree (simple)
+- `PARALLEL_MODE=1+`: Uses git worktrees for parallel branch management (useful when fixing multiple PRs)
 
 ### Epic Source Files
 
