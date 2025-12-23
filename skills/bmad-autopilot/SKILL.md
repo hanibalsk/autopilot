@@ -51,24 +51,42 @@ The orchestrator runs through these phases:
 
 ## Auto-Approve Integration
 
-The `auto-approve.yml` GitHub workflow handles PR approval automatically:
+The `auto-approve.yml` GitHub workflow handles PR approval with strict conditions:
 
+**Approval conditions (ALL must be met):**
+1. At least 10 minutes since last push
+2. Copilot review exists
+3. All review threads resolved
+4. All CI checks passed
+
+**Flow:**
 1. **After PR creation** - Autopilot continues to next epic immediately
 2. **Copilot reviews** - Triggers auto-approve workflow
 3. **Workflow waits for CI** - Polls until all checks pass
-4. **Workflow checks threads** - If 0 unresolved → approves PR
-5. **PR becomes mergeable** - Autopilot's background check merges it
+4. **Workflow checks conditions** - 10 min wait, threads resolved
+5. **Dismisses stale approvals** - If unresolved threads exist
+6. **Approves only when ready** - All conditions met
+7. **PR becomes mergeable** - Autopilot's background check merges it
 
-**If Copilot has comments:**
-- Autopilot detects unresolved threads during periodic check
-- Switches to FIX_ISSUES phase
-- Fixes issues, resolves threads via GraphQL
-- Pushes fixes → Copilot re-reviews → auto-approve triggers again
+**If Copilot has comments (FIX_ISSUES phase):**
+1. Autopilot detects unresolved threads during periodic check
+2. Fetches thread content (file, line, comment) via GraphQL
+3. Claude fixes the issues
+4. Posts reply to PR acknowledging feedback
+5. Resolves all threads via GraphQL mutation
+6. Pushes fixes → Copilot re-reviews → auto-approve triggers again
+7. 10 min wait ensures Copilot has time to re-review
 
 **Manual workflow trigger:**
 ```bash
 gh workflow run auto-approve.yml -f pr_number=123
 ```
+
+**Critical requirements:**
+- Never approve with unresolved threads
+- Always reply to review comments
+- Always resolve threads after fixing
+- Wait 10 min after push before approval
 
 ## Logs and State
 

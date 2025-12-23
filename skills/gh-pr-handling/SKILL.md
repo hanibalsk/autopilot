@@ -209,14 +209,24 @@ gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies -f body="Fi
 
 ## Auto-Approve Workflow
 
-The `auto-approve.yml` GitHub workflow automates PR approval:
+The `auto-approve.yml` GitHub workflow automates PR approval with strict conditions.
+
+**Approval conditions (ALL must be met):**
+1. At least 10 minutes since last push
+2. Copilot review exists
+3. All review threads resolved
+4. All review comments answered
+5. All CI checks passed
 
 **Flow:**
 1. Copilot submits review → triggers workflow
 2. Waits 2 min for CI to start
 3. Polls CI every 30s (max 30 min), fails fast on failure
-4. Checks unresolved review threads via GraphQL
-5. Auto-approves if CI passes AND 0 unresolved threads
+4. Checks 10 min elapsed since last push
+5. Checks Copilot has reviewed
+6. Checks 0 unresolved threads via GraphQL
+7. **Dismisses stale approvals** if unresolved threads exist
+8. Auto-approves only if ALL conditions met
 
 **Manual trigger (fallback):**
 ```bash
@@ -239,6 +249,12 @@ gh run view <run-id>
 - Branch protection requires approval before merge
 - Copilot review alone doesn't count as approval
 - This workflow bridges the gap: Copilot reviews → workflow approves → merge allowed
+
+**Critical: Fix issues before approval:**
+- Unresolved threads block approval
+- Stale approvals are dismissed if threads exist
+- Must reply to comments AND resolve threads
+- 10 min wait ensures Copilot has time to re-review after fixes
 
 **When autopilot should NOT wait:**
 - After creating PR, auto-approve workflow handles approval
