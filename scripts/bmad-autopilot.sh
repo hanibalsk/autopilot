@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+AUTOPILOT_VERSION="0.1.0"
 #
 # BMAD Autopilot - Autonomous Development Orchestrator (Claude Code)
 #

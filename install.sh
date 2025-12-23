@@ -9,8 +9,14 @@ TARGET_DIR="${1:-$(pwd)}"
 BACKUP_DIR="$TARGET_DIR/.autopilot/backup"
 TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 
-echo "🚀 BMAD Autopilot Installer"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+# Read version from VERSION file
+AUTOPILOT_VERSION="0.1.0"
+if [[ -f "$SCRIPT_DIR/VERSION" ]]; then
+  AUTOPILOT_VERSION=$(cat "$SCRIPT_DIR/VERSION" | tr -d '[:space:]')
+fi
+
+echo "🚀 BMAD Autopilot Installer v$AUTOPILOT_VERSION"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
 # Check prerequisites

@@ -1,5 +1,7 @@
 # BMAD Autopilot
 
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](VERSION)
+
 **Autonomous Development Orchestrator for Claude Code**
 
 BMAD Autopilot is a state-machine-driven bash orchestrator that automates the entire development cycle from epic selection to PR merge. It works with Claude Code CLI and GitHub Copilot to provide a fully autonomous development experience.
