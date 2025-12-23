@@ -165,6 +165,33 @@ else
   echo "⏭️  Skipped Claude commands and skills"
 fi
 
+# Install GitHub workflows
+echo ""
+if [ -d "$SCRIPT_DIR/workflows" ]; then
+  WORKFLOWS_DIR="$TARGET_DIR/.github/workflows"
+
+  # Check for existing workflow
+  if [ -f "$WORKFLOWS_DIR/auto-approve.yml" ]; then
+    echo "ℹ️  GitHub workflow already exists at $WORKFLOWS_DIR/auto-approve.yml"
+    read -p "🔄 Update auto-approve workflow? [y/N] " -n 1 -r
+    echo ""
+    INSTALL_WORKFLOW=$([[ $REPLY =~ ^[Yy]$ ]] && echo "yes" || echo "no")
+  else
+    read -p "🤖 Install auto-approve GitHub workflow? [y/N] " -n 1 -r
+    echo ""
+    INSTALL_WORKFLOW=$([[ $REPLY =~ ^[Yy]$ ]] && echo "yes" || echo "no")
+  fi
+
+  if [ "$INSTALL_WORKFLOW" = "yes" ]; then
+    mkdir -p "$WORKFLOWS_DIR"
+    cp "$SCRIPT_DIR/workflows/auto-approve.yml" "$WORKFLOWS_DIR/"
+    echo "✅ GitHub workflow installed to $WORKFLOWS_DIR/auto-approve.yml"
+    echo "   → Auto-approves PRs when CI passes and Copilot review has no unresolved threads"
+  else
+    echo "⏭️  Skipped GitHub workflow"
+  fi
+fi
+
 # Add to .gitignore if not already there
 echo ""
 if [ -f "$TARGET_DIR/.gitignore" ]; then

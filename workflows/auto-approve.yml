@@ -1,0 +1,166 @@
+name: Auto-Approve after Copilot Review
+
+on:
+  # Automatic trigger when a PR review is submitted
+  pull_request_review:
+    types: [submitted]
+
+  # Manual trigger as fallback
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to approve'
+        required: true
+        type: number
+
+jobs:
+  auto-approve:
+    name: Auto-Approve PR
+    runs-on: ubuntu-latest
+    # Only run for Copilot reviews or manual trigger
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.user.login, 'copilot'))
+
+    permissions:
+      pull-requests: write
+      contents: read
+      checks: read
+      actions: read
+
+    steps:
+      - name: Get PR number
+        id: pr
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "number=${{ github.event.inputs.pr_number }}" >> $GITHUB_OUTPUT
+          else
+            echo "number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Initial delay
+        run: |
+          echo "Waiting 2 minutes for CI to start and Copilot review to settle..."
+          sleep 120
+
+      - name: Wait for CI to complete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=${{ steps.pr.outputs.number }}
+          REPO=${{ github.repository }}
+
+          echo "Waiting for CI checks to complete on PR #$PR_NUMBER..."
+
+          # Get the HEAD SHA of the PR
+          HEAD_SHA=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha')
+          echo "HEAD SHA: $HEAD_SHA"
+
+          # Wait up to 30 minutes for checks to complete
+          MAX_ATTEMPTS=60
+          ATTEMPT=0
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+
+            # Get check runs status
+            CHECK_STATUS=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" \
+              --jq '{
+                total: .total_count,
+                completed: [.check_runs[] | select(.status == "completed")] | length,
+                success: [.check_runs[] | select(.conclusion == "success")] | length,
+                failure: [.check_runs[] | select(.conclusion == "failure")] | length,
+                pending: [.check_runs[] | select(.status != "completed")] | length
+              }')
+
+            TOTAL=$(echo "$CHECK_STATUS" | jq -r '.total')
+            COMPLETED=$(echo "$CHECK_STATUS" | jq -r '.completed')
+            SUCCESS=$(echo "$CHECK_STATUS" | jq -r '.success')
+            FAILURE=$(echo "$CHECK_STATUS" | jq -r '.failure')
+            PENDING=$(echo "$CHECK_STATUS" | jq -r '.pending')
+
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: $COMPLETED/$TOTAL checks completed ($SUCCESS success, $FAILURE failure, $PENDING pending)"
+
+            # If any check failed, exit early
+            if [ "$FAILURE" -gt 0 ]; then
+              echo "❌ CI failed! $FAILURE check(s) failed."
+              exit 1
+            fi
+
+            # If all checks completed successfully
+            if [ "$COMPLETED" -eq "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then
+              echo "✅ All $TOTAL CI checks passed!"
+              break
+            fi
+
+            # Wait 30 seconds before next check
+            sleep 30
+          done
+
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "⏰ Timeout waiting for CI checks"
+            exit 1
+          fi
+
+      - name: Check review status
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=${{ steps.pr.outputs.number }}
+          REPO=${{ github.repository }}
+
+          echo "Checking review status for PR #$PR_NUMBER..."
+
+          # Count Copilot reviews (GitHub Copilot pull request reviewer bot)
+          # Using type=Bot check for reliability, with login containing "copilot"
+          REVIEW_COUNT=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
+            --jq '[.[] | select(.user.type == "Bot" and (.user.login | contains("copilot")))] | length')
+
+          echo "Copilot reviews: $REVIEW_COUNT"
+
+          # Count unresolved threads (any author)
+          UNRESOLVED=$(gh api graphql -f query='
+            query($owner: String!, $repo: String!, $pr: Int!) {
+              repository(owner: $owner, name: $repo) {
+                pullRequest(number: $pr) {
+                  reviewThreads(first: 100) {
+                    nodes { isResolved }
+                  }
+                }
+              }
+            }' -f owner="${REPO%/*}" -f repo="${REPO#*/}" -F pr="$PR_NUMBER" \
+            --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' 2>/dev/null || echo "0")
+
+          echo "Unresolved threads: $UNRESOLVED"
+
+          # Approve if:
+          # 1. At least 1 Copilot review AND 0 unresolved threads, OR
+          # 2. Copilot reviewed but generated no comments (review count may be 0 but no threads exist)
+          if [ "$REVIEW_COUNT" -ge 1 ] && [ "$UNRESOLVED" -eq 0 ]; then
+            echo "should_approve=true" >> $GITHUB_OUTPUT
+            echo "reason=Copilot reviewed with $REVIEW_COUNT review(s) and 0 unresolved threads" >> $GITHUB_OUTPUT
+            echo "✅ $REVIEW_COUNT Copilot review(s), 0 unresolved - ready to approve"
+          elif [ "$UNRESOLVED" -eq 0 ]; then
+            # Copilot may have reviewed but generated no comments - still approve if CI passed
+            echo "should_approve=true" >> $GITHUB_OUTPUT
+            echo "reason=CI passed and no unresolved review comments" >> $GITHUB_OUTPUT
+            echo "✅ CI passed, 0 unresolved threads - ready to approve (Copilot may have reviewed with no comments)"
+          else
+            echo "should_approve=false" >> $GITHUB_OUTPUT
+            echo "⏳ Cannot approve: $UNRESOLVED unresolved thread(s)"
+          fi
+
+      - name: Auto-approve PR
+        if: steps.check.outputs.should_approve == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_APPROVE_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=${{ steps.pr.outputs.number }}
+          REASON="${{ steps.check.outputs.reason }}"
+
+          gh pr review "$PR_NUMBER" --approve --body "✅ Auto-approved: $REASON
+
+          _This approval was automatically granted by the CI workflow._"
+
+          echo "✅ PR #$PR_NUMBER approved!"
