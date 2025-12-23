@@ -531,7 +531,8 @@ parse_epics_from_bmad_output() {
   local f
   for f in "${files[@]}"; do
     # Match epic headers with 2-4 hashes: ## Epic, ### Epic, #### Epic
-    rg -N --no-filename '^#{2,4} Epic ' "$f" || true
+    # Require ID to start with a digit (avoids matching "## Epic List" etc.)
+    rg -N --no-filename '^#{2,4} Epic [0-9]' "$f" || true
   done \
     | sed -E 's/^#{2,4} Epic ([^:]+):.*/\1/' \
     | tr -d '\r' \
