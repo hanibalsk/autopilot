@@ -64,9 +64,19 @@ backup_file "$TARGET_DIR/.autopilot/config.example"
 backup_file "$TARGET_DIR/.claude/commands/autopilot.md"
 backup_file "$TARGET_DIR/.claude/commands/bmad-autopilot.md"
 
+# Backup local Claude skills
+if [ -f "$TARGET_DIR/.claude/skills/bmad-autopilot/SKILL.md" ]; then
+  backup_file "$TARGET_DIR/.claude/skills/bmad-autopilot/SKILL.md"
+fi
+
 # Backup global Claude commands
 backup_file "$HOME/.claude/commands/autopilot.md"
 backup_file "$HOME/.claude/commands/bmad-autopilot.md"
+
+# Backup global Claude skills
+if [ -f "$HOME/.claude/skills/bmad-autopilot/SKILL.md" ]; then
+  backup_file "$HOME/.claude/skills/bmad-autopilot/SKILL.md"
+fi
 
 if [ "$BACKUP_CREATED" = true ]; then
   echo "✅ Backup created: $BACKUP_DIR/${TIMESTAMP}.zip"
@@ -138,8 +148,21 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
   mkdir -p "$COMMANDS_DIR"
   cp "$SCRIPT_DIR/commands/"*.md "$COMMANDS_DIR/"
   echo "✅ Claude commands installed to $COMMANDS_DIR/"
+
+  # Also install skills to the same scope
+  if [ "$COMMANDS_DIR" = "$TARGET_DIR/.claude/commands" ]; then
+    SKILLS_DIR="$TARGET_DIR/.claude/skills"
+  else
+    SKILLS_DIR="$HOME/.claude/skills"
+  fi
+
+  if [ -d "$SCRIPT_DIR/skills" ]; then
+    mkdir -p "$SKILLS_DIR"
+    cp -r "$SCRIPT_DIR/skills/"* "$SKILLS_DIR/"
+    echo "✅ Claude skills installed to $SKILLS_DIR/"
+  fi
 else
-  echo "⏭️  Skipped Claude commands"
+  echo "⏭️  Skipped Claude commands and skills"
 fi
 
 # Add to .gitignore if not already there
