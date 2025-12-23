@@ -1169,38 +1169,34 @@ phase_create_pr() {
   # Note: Copilot review triggers automatically on push (branch protection)
   # No need to manually request @copilot review
 
+  # Add PR to pending list for background monitoring
+  local branch_name="feature/epic-${epic_id}"
+  local wt_path
+  wt_path="$(worktree_path "$epic_id")"
+
+  # Record pending PR - worktree will be created on-demand if fixes are needed
+  state_add_pending_pr "$epic_id" "$pr_number" "$wt_path"
+  log "✅ PR #$pr_number created for epic $epic_id, added to pending list"
+
+  # Switch back to base branch for next epic
+  git checkout "$BASE_BRANCH"
+  git pull origin "$BASE_BRANCH"
+
   if [ "$PARALLEL_MODE" = "1" ]; then
-    # Parallel mode: add PR to pending list and start next epic
-    local branch_name="feature/epic-${epic_id}"
-    local wt_path
-    wt_path="$(worktree_path "$epic_id")"
-
-    # We are currently ON the feature branch, so we can't create a worktree for it directly.
-    # Instead, we'll switch to main first, then the worktree can track the remote branch.
-    # The worktree is only needed if we need to fix issues later.
-    # For now, just record the path - worktree will be created on-demand in fix_pending_pr_issues()
-
-    state_add_pending_pr "$epic_id" "$pr_number" "$wt_path"
-    log "✅ PR #$pr_number created for epic $epic_id, added to pending list"
-
-    # Switch back to base branch for next epic
-    git checkout "$BASE_BRANCH"
-    git pull origin "$BASE_BRANCH"
-
-    # Check if we can start another epic (respect MAX_PENDING_PRS)
+    # Parallel mode: respect MAX_PENDING_PRS limit
     local pending_count
     pending_count="$(state_count_pending_prs)"
     if [ "$pending_count" -ge "$MAX_PENDING_PRS" ]; then
       log "📋 Reached max pending PRs ($MAX_PENDING_PRS), waiting for reviews..."
       state_set "WAIT_PENDING_PRS" "null"
     else
-      log "🔄 Starting next epic (parallel mode)..."
+      log "🔄 Starting next epic..."
       state_set "FIND_EPIC" "null"
     fi
   else
-    # Sequential mode: wait for review
-    state_set "WAIT_COPILOT" "\"$epic_id\""
-    log "✅ PR created, Copilot review will trigger automatically on push"
+    # Sequential/auto mode: immediately start next epic, PRs monitored in background
+    log "🔄 PR created, starting next epic (PR review runs in background)..."
+    state_set "FIND_EPIC" "null"
   fi
 }
 
