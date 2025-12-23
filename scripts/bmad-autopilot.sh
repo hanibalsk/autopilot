@@ -1244,6 +1244,34 @@ phase_create_branch() {
 # ============================================
 # PHASE: DEVELOP_STORIES
 # ============================================
+
+# Find the epic file containing a specific epic ID
+find_epic_file() {
+  local epic_id="$1"
+  local bmad_out_dir="$ROOT_DIR/_bmad-output"
+
+  if [ ! -d "$bmad_out_dir" ]; then
+    return 1
+  fi
+
+  local files=()
+  while IFS= read -r f; do
+    [ -n "$f" ] && files+=("$f")
+  done < <(find "$bmad_out_dir" -maxdepth 1 -type f \( -iname 'epics*.md' -o -iname '@epics.md' \) | LC_ALL=C sort)
+
+  local f
+  for f in "${files[@]}"; do
+    # Check if this file contains the epic (handle alphanumeric IDs like 7A, 10A-SSO)
+    if rg -q "^#{1,4} Epic ${epic_id}[^0-9A-Za-z-]" "$f" 2>/dev/null || \
+       rg -q "^### Epic ${epic_id}:" "$f" 2>/dev/null || \
+       rg -q "^#### Epic ${epic_id}:" "$f" 2>/dev/null; then
+      echo "$f"
+      return 0
+    fi
+  done
+  return 1
+}
+
 phase_develop_stories() {
   log "💻 PHASE: DEVELOP_STORIES"
 
@@ -1256,11 +1284,24 @@ phase_develop_stories() {
     git add -A && git commit -m "chore: auto-commit before story development" || true
   fi
 
+  # Find the epic file containing this epic
+  local epic_file=""
+  if epic_file="$(find_epic_file "$epic_id")"; then
+    log "📄 Found epic in: $epic_file"
+  else
+    log "⚠️ Could not find epic file for $epic_id, using default _bmad-output/ search"
+    epic_file="$ROOT_DIR/_bmad-output/epics.md"
+  fi
+
   local output_file="$TMP_DIR/develop-stories-output.txt"
 
   # Main development runs in interactive foreground mode
   run_claude_interactive "
 /bmad:bmm:workflows:dev-story develop epic stories ${epic_id}.*
+
+## Epic Location
+The epic ${epic_id} is defined in: ${epic_file}
+Read this file to find the stories for epic ${epic_id}.
 
 ## Development Task
 For each story in epic ${epic_id}:
