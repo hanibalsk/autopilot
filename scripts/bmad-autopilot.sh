@@ -860,8 +860,10 @@ phase_check_pending_pr() {
       -q '.[] | select(.headRefName | test("^feature/epic-")) | "\(.number):\(.headRefName)"'
   )"
 
-  local open_count
-  open_count="$(echo "$open_epic_branches" | grep -c . || echo 0)"
+  local open_count=0
+  if [ -n "$open_epic_branches" ]; then
+    open_count="$(echo "$open_epic_branches" | wc -l | tr -d ' ')"
+  fi
 
   if [ "$open_count" -gt 0 ]; then
     log "📋 Found $open_count open epic PR(s):"
