@@ -1,89 +1,85 @@
 ---
 description: Run BMAD Autopilot - Autonomous Development Flow (multi-epic state machine)
-allowed-tools: Bash,Read,Write,Edit,Grep
+allowed-tools: Bash,Read,Write,Edit,Grep,Glob,TodoWrite
 user-invocable: true
 ---
 
 # BMAD Autopilot - Autonomous Development Flow
 
-Run fully autonomous BMAD development cycle.
+You are an autonomous development orchestrator. Process epics through the full development cycle.
 
-**Epic selection:**
-- If `$ARGUMENTS` is provided: process only matching epics (e.g., `7A 8A`, `10A-SSO`, `10A.*`)
-- If no arguments: **auto-detect and process ALL epics** from `_bmad-output/` epics files in order (`epics*.md` and `@epics.md`)
+**Epic pattern:** $ARGUMENTS (if empty, find next epic from `_bmad-output/epics*.md`)
 
-**Supported epic ID formats:** `1`, `7A`, `10B`, `10A-SSO`, etc.
+## Step 1: Load State
 
-## Your Role
+Read `.autopilot/state.json` to get current phase and epic. If file doesn't exist, start fresh.
 
-You are an autonomous development orchestrator. Your goal is to completely process all epics in the sprint without human intervention, until everything is DONE or BLOCKED.
+## Step 2: Execute Current Phase
 
-## Workflow State Machine
+Based on state phase, execute:
 
+### FIND_EPIC / CHECK_PENDING_PR
+1. Search `_bmad-output/epics*.md` for epic headers: `^#{2,4} Epic [0-9]`
+2. Skip epics in `completed_epics` list
+3. Filter by `$ARGUMENTS` pattern if provided
+4. Set `current_epic` and move to CREATE_BRANCH
+
+### CREATE_BRANCH
+1. `git fetch origin && git checkout main && git pull`
+2. `git checkout -b feature/epic-{ID}` or checkout if exists
+3. `git push -u origin feature/epic-{ID}`
+4. Move to DEVELOP_STORIES
+
+### DEVELOP_STORIES
+1. Find epic file containing the epic ID
+2. Run: `/bmad:bmm:workflows:dev-story develop epic stories {ID}.*`
+3. Pass epic file location in prompt
+4. For each story: implement, test, commit
+5. Move to CODE_REVIEW
+
+### CODE_REVIEW
+1. Run: `/bmad:bmm:workflows:code-review`
+2. Fix any issues found
+3. Run local checks (lint, test, build)
+4. `git push`
+5. Move to CREATE_PR
+
+### CREATE_PR
+1. `gh pr create --title "feat(epic-{ID}): ..." --body "..."`
+2. Add PR to pending list in state
+3. Move to FIND_EPIC (continue to next epic - non-blocking)
+
+### FIX_ISSUES (when PR has unresolved threads)
+1. Fetch unresolved threads via GraphQL
+2. Fix each issue
+3. Reply to comments
+4. Resolve threads via GraphQL mutation
+5. `git push`
+6. Return to waiting
+
+### DONE
+All epics processed. Report summary.
+
+## Step 3: Update State
+
+After each phase, update `.autopilot/state.json`:
+```json
+{
+  "phase": "NEXT_PHASE",
+  "current_epic": "41",
+  "completed_epics": ["1", "2A", ...]
+}
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  INIT -> CHECK_PENDING_PR -> FIND_EPIC -> CREATE_BRANCH ->     │
-│  DEVELOP_STORIES -> CODE_REVIEW -> CREATE_PR ->                 │
-│  WAIT_COPILOT -> WAIT_CHECKS -> MERGE_PR -> (loop) -> DONE     │
-│       │              │                                          │
-│       ▼              ▼                                          │
-│  FIX_ISSUES ◄────────┴─── (fix Copilot comments + CI failures) │
-│       │                                                         │
-│       └──────► WAIT_COPILOT (re-review after fixes)            │
-└─────────────────────────────────────────────────────────────────┘
-```
 
-**Key flow points:**
-- Before starting a new epic, CHECK_PENDING_PR looks for unfinished PRs
-- WAIT_COPILOT waits for Copilot to comment (it always does when finished)
-- WAIT_CHECKS waits for CI to pass
-- FIX_ISSUES fixes both Copilot comments AND CI failures, then loops back
-- MERGE_PR only happens when both Copilot approved and CI passed
+## Rules
 
-## Execution
+1. **NEVER ask questions** - make autonomous decisions
+2. **Commit often** - atomic commits with `feat({epic}): description`
+3. **Log progress** - append to `.autopilot/autopilot.log`
+4. **Continue on errors** - mark BLOCKED and try next epic
+5. **Update state** - persist after each phase transition
 
-Run this workflow for sprint/epics: $ARGUMENTS
+## Start Now
 
-**Use the bash orchestrator directly:**
-
-```bash
-# Auto-detect all epics:
-./.autopilot/bmad-autopilot.sh
-
-# Specific epics only:
-./.autopilot/bmad-autopilot.sh "7A 8A 10B"
-
-# Epic with suffix:
-./.autopilot/bmad-autopilot.sh "10A-SSO"
-
-# Regex patterns (matches 10A, 10A-SSO, etc.):
-./.autopilot/bmad-autopilot.sh "10A.*"
-
-# Multiple regex patterns:
-./.autopilot/bmad-autopilot.sh "7.* 10.*"
-```
-
-To resume after interruption:
-
-```bash
-./.autopilot/bmad-autopilot.sh --continue
-# or with specific pattern:
-./.autopilot/bmad-autopilot.sh "7A" --continue
-```
-
-## Rules for Autonomous Mode
-
-1. **NEVER ask questions** - make decisions yourself
-2. **Commit often** - small atomic commits
-3. **Log everything** - append to `.autopilot/autopilot.log`
-4. **Fail gracefully** - if something fails, log it and continue with next epic
-5. **State persistence** - always update state file after each phase
-
-## Error Handling
-
-If BLOCKED state occurs:
-1. Log to `.autopilot/autopilot.log`
-2. Create GitHub issue with details
-3. Continue with next epic if possible
-4. Report all BLOCKED items at the end
+Read state and execute the current phase for: $ARGUMENTS
 
