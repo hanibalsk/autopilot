@@ -510,8 +510,9 @@ parse_epics_from_bmad_output() {
   # - @epics.md
   # - epics-002.md, epics-*.md, etc.
   #
-  # Lines look like:
-  #   "#### Epic 7A: ..." => 7A
+  # Lines look like (various header levels):
+  #   "## Epic 7A: ..." => 7A
+  #   "### Epic 41: ..." => 41
   #   "#### Epic 10A-SSO: ..." => 10A-SSO
   local bmad_out_dir="$ROOT_DIR/_bmad-output"
   if [ ! -d "$bmad_out_dir" ]; then
@@ -529,11 +530,13 @@ parse_epics_from_bmad_output() {
 
   local f
   for f in "${files[@]}"; do
-    rg -N --no-filename '^#### Epic ' "$f" || true
+    # Match epic headers with 2-4 hashes: ## Epic, ### Epic, #### Epic
+    rg -N --no-filename '^#{2,4} Epic ' "$f" || true
   done \
-    | sed -E 's/^#### Epic ([^:]+):.*/\1/' \
+    | sed -E 's/^#{2,4} Epic ([^:]+):.*/\1/' \
     | tr -d '\r' \
-    | sed -E 's/^[[:space:]]+|[[:space:]]+$//g'
+    | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' \
+    | sort -u
 }
 
 epic_matches_patterns() {
@@ -1262,9 +1265,8 @@ find_epic_file() {
   local f
   for f in "${files[@]}"; do
     # Check if this file contains the epic (handle alphanumeric IDs like 7A, 10A-SSO)
-    if rg -q "^#{1,4} Epic ${epic_id}[^0-9A-Za-z-]" "$f" 2>/dev/null || \
-       rg -q "^### Epic ${epic_id}:" "$f" 2>/dev/null || \
-       rg -q "^#### Epic ${epic_id}:" "$f" 2>/dev/null; then
+    # Match headers with 2-4 hashes: ## Epic, ### Epic, #### Epic
+    if rg -q "^#{2,4} Epic ${epic_id}:" "$f" 2>/dev/null; then
       echo "$f"
       return 0
     fi
