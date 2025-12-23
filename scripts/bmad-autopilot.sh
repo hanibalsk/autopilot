@@ -1480,38 +1480,58 @@ phase_wait_checks() {
       ci_pending=true
     fi
 
-    # Check Copilot approval status (required by branch protection)
-    local copilot_approved=false
+    # Check for any approval (from auto-approve workflow or manual)
+    # Note: Copilot only gives COMMENTED state, the auto-approve.yml workflow provides APPROVED
+    local is_approved=false
+    local approval_info
+    approval_info="$(gh pr view --json reviews -q '
+      [.reviews[] | select(.state == "APPROVED")] | .[-1] | {author: .author.login, state: .state} // {}
+    ' 2>/dev/null || echo "{}")"
+
+    local approver
+    approver="$(echo "$approval_info" | jq -r '.author // ""')"
+    if [ -n "$approver" ]; then
+      is_approved=true
+    fi
+
+    # Check if Copilot requested changes
     local copilot_state
     copilot_state="$(gh pr view --json reviews -q '
       [.reviews[] | select(.author.login | test("copilot"; "i"))] | sort_by(.submittedAt) | .[-1].state // ""
     ' 2>/dev/null || echo "")"
 
-    if [ "$copilot_state" = "APPROVED" ]; then
-      copilot_approved=true
-    elif [ "$copilot_state" = "CHANGES_REQUESTED" ]; then
+    if [ "$copilot_state" = "CHANGES_REQUESTED" ]; then
       log "⚠️ Copilot requested changes during WAIT_CHECKS"
       state_set "FIX_ISSUES" "\"$epic_id\""
       return 0
     fi
 
-    # Both CI and Copilot must pass
+    # Check for unresolved review threads (blocks merge even if approved)
+    local unresolved_count
+    unresolved_count="$(count_unresolved_threads "$pr_number")"
+    if [ "$unresolved_count" -gt 0 ]; then
+      log "⚠️ Found $unresolved_count unresolved thread(s) - need to fix"
+      state_set "FIX_ISSUES" "\"$epic_id\""
+      return 0
+    fi
+
+    # Both CI and approval must pass
     if [ "$ci_pending" = true ]; then
-      verbose "   Iteration $i/$MAX_CHECK_WAIT: CI pending, Copilot=$copilot_state, waiting ${CHECK_INTERVAL}s..."
+      verbose "   Iteration $i/$MAX_CHECK_WAIT: CI pending, approved=$is_approved, waiting ${CHECK_INTERVAL}s..."
       log "… CI checks pending ($i/$MAX_CHECK_WAIT)"
       sleep "$CHECK_INTERVAL"
       continue
     fi
 
-    if [ "$copilot_approved" = false ]; then
-      verbose "   Iteration $i/$MAX_CHECK_WAIT: CI passed, waiting for Copilot (current: $copilot_state), waiting ${CHECK_INTERVAL}s..."
-      log "… Waiting for Copilot approval ($i/$MAX_CHECK_WAIT) [current: $copilot_state]"
+    if [ "$is_approved" = false ]; then
+      verbose "   Iteration $i/$MAX_CHECK_WAIT: CI passed, waiting for approval (auto-approve workflow), waiting ${CHECK_INTERVAL}s..."
+      log "… Waiting for approval ($i/$MAX_CHECK_WAIT) [Copilot: $copilot_state, threads: $unresolved_count]"
       sleep "$CHECK_INTERVAL"
       continue
     fi
 
-    # All checks passed AND Copilot approved
-    log "✅ All CI checks passed AND Copilot approved"
+    # All checks passed AND approved
+    log "✅ All CI checks passed AND approved (by: $approver)"
     state_set "MERGE_PR" "\"$epic_id\""
     return 0
   done
