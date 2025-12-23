@@ -5,7 +5,10 @@
 # Environment variables override these settings
 # Command line flags (--debug) override environment variables
 
-# Enable debug logging to .autopilot/tmp/debug.log
+# Enable verbose console output (shows more details during execution)
+# AUTOPILOT_VERBOSE=0
+
+# Enable debug logging to .autopilot/tmp/debug.log (implies verbose)
 # AUTOPILOT_DEBUG=0
 
 # Maximum Claude turns per phase

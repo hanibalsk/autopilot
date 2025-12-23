@@ -10,8 +10,11 @@
 #   ./bmad-autopilot.sh "7.* 10.*"                # regex patterns (space-separated)
 #   ./bmad-autopilot.sh --continue                # resume previous run (all epics)
 #   ./bmad-autopilot.sh "7A" --continue           # resume with specific pattern
+#   ./bmad-autopilot.sh --verbose                 # enable verbose console output
+#   ./bmad-autopilot.sh -v                        # shorthand for --verbose
 #   ./bmad-autopilot.sh --debug                   # enable debug logging to .autopilot/tmp/debug.log
 #   AUTOPILOT_DEBUG=1 ./bmad-autopilot.sh        # alternative: enable debug via env var
+#   AUTOPILOT_VERBOSE=1 ./bmad-autopilot.sh      # alternative: enable verbose via env var
 #   PARALLEL_MODE=1 ./bmad-autopilot.sh          # enable parallel epic development
 #
 # Branch Protection Requirements:
@@ -110,7 +113,7 @@ mkdir -p "$AUTOPILOT_DIR" "$TMP_DIR"
 
 # Load config file safely (whitelist allowed keys, no arbitrary code execution)
 # Allowed config keys:
-ALLOWED_CONFIG_KEYS="AUTOPILOT_DEBUG MAX_TURNS CHECK_INTERVAL MAX_CHECK_WAIT MAX_COPILOT_WAIT AUTOPILOT_RUN_MOBILE_NATIVE PARALLEL_MODE PARALLEL_CHECK_INTERVAL MAX_PENDING_PRS AUTOPILOT_BASE_BRANCH"
+ALLOWED_CONFIG_KEYS="AUTOPILOT_DEBUG AUTOPILOT_VERBOSE MAX_TURNS CHECK_INTERVAL MAX_CHECK_WAIT MAX_COPILOT_WAIT AUTOPILOT_RUN_MOBILE_NATIVE PARALLEL_MODE PARALLEL_CHECK_INTERVAL MAX_PENDING_PRS AUTOPILOT_BASE_BRANCH"
 
 load_config_safely() {
   local config_file="$1"
@@ -144,19 +147,27 @@ if [ -f "$CONFIG_FILE" ]; then
   load_config_safely "$CONFIG_FILE"
 fi
 
-# Config - parse arguments (handle --continue and --debug as first or second arg)
+# Config - parse arguments (handle --continue, --debug, --verbose as first or second arg)
 EPIC_PATTERN=""
 CONTINUE_FLAG=""
 DEBUG_MODE="${AUTOPILOT_DEBUG:-0}"
+VERBOSE_MODE="${AUTOPILOT_VERBOSE:-0}"
 for arg in "$@"; do
   if [ "$arg" = "--continue" ]; then
     CONTINUE_FLAG="--continue"
   elif [ "$arg" = "--debug" ]; then
     DEBUG_MODE="1"
+  elif [ "$arg" = "--verbose" ] || [ "$arg" = "-v" ]; then
+    VERBOSE_MODE="1"
   elif [ -z "$EPIC_PATTERN" ]; then
     EPIC_PATTERN="$arg"
   fi
 done
+
+# Debug mode implies verbose
+if [ "$DEBUG_MODE" = "1" ]; then
+  VERBOSE_MODE="1"
+fi
 
 # Configuration with defaults (env vars override config file)
 MAX_TURNS="${MAX_TURNS:-80}"
@@ -185,10 +196,23 @@ log() {
   echo "$msg" | tee -a "$LOG_FILE"
 }
 
+# Verbose logging - shown in console when --verbose or -v flag is used
+verbose() {
+  local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+  echo "$msg" >> "$LOG_FILE"
+  if [ "$VERBOSE_MODE" = "1" ]; then
+    echo "$msg"
+  fi
+}
+
 debug() {
   if [ "$DEBUG_MODE" = "1" ]; then
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] DEBUG: $1"
     echo "$msg" >> "$DEBUG_LOG"
+    # Also show debug in console when verbose
+    if [ "$VERBOSE_MODE" = "1" ]; then
+      echo "$msg"
+    fi
   fi
 }
 
@@ -840,6 +864,9 @@ run_claude_headless() {
   local output_file="${4:-$TMP_DIR/claude-output.txt}"
 
   log "🤖 Claude headless (max_turns=$max_turns)"
+  verbose "   Tools: $allowed_tools"
+  verbose "   Output: $output_file"
+  verbose "   Prompt (first 200 chars): ${prompt:0:200}..."
   claude -p "$prompt" \
     --permission-mode acceptEdits \
     --allowedTools "$allowed_tools" \
@@ -852,6 +879,7 @@ run_claude_headless() {
 # ============================================
 phase_check_pending_pr() {
   log "🔍 PHASE: CHECK_PENDING_PR"
+  verbose "   Checking for open epic PRs..."
 
   # 1) Count and list all open epic PRs - we must finish them before starting new epics
   local open_epic_branches
@@ -864,6 +892,7 @@ phase_check_pending_pr() {
   if [ -n "$open_epic_branches" ]; then
     open_count="$(echo "$open_epic_branches" | wc -l | tr -d ' ')"
   fi
+  verbose "   Found $open_count open epic PR(s)"
 
   if [ "$open_count" -gt 0 ]; then
     log "📋 Found $open_count open epic PR(s):"
@@ -1199,14 +1228,16 @@ phase_wait_copilot() {
 
     # Skip if no comment/review found
     if [ -z "$latest_id" ]; then
-      log "… waiting for Copilot to review ($i)"
+      verbose "   Iteration $i/$max_copilot_wait: No Copilot review yet, waiting ${CHECK_INTERVAL}s..."
+      log "… waiting for Copilot to review ($i/$max_copilot_wait)"
       sleep "$CHECK_INTERVAL"
       continue
     fi
 
     # Skip if same as already processed
     if [ "$latest_id" = "$last_processed_id" ]; then
-      log "… waiting for NEW Copilot activity (already processed $latest_id) ($i)"
+      verbose "   Iteration $i/$max_copilot_wait: Already processed $latest_id, waiting ${CHECK_INTERVAL}s..."
+      log "… waiting for NEW Copilot activity (already processed $latest_id) ($i/$max_copilot_wait)"
       sleep "$CHECK_INTERVAL"
       continue
     fi
@@ -1302,12 +1333,14 @@ phase_wait_checks() {
 
     # Both CI and Copilot must pass
     if [ "$ci_pending" = true ]; then
+      verbose "   Iteration $i/$MAX_CHECK_WAIT: CI pending, Copilot=$copilot_state, waiting ${CHECK_INTERVAL}s..."
       log "… CI checks pending ($i/$MAX_CHECK_WAIT)"
       sleep "$CHECK_INTERVAL"
       continue
     fi
 
     if [ "$copilot_approved" = false ]; then
+      verbose "   Iteration $i/$MAX_CHECK_WAIT: CI passed, waiting for Copilot (current: $copilot_state), waiting ${CHECK_INTERVAL}s..."
       log "… Waiting for Copilot approval ($i/$MAX_CHECK_WAIT) [current: $copilot_state]"
       sleep "$CHECK_INTERVAL"
       continue
@@ -1520,6 +1553,24 @@ phase_wait_pending_prs() {
 
 main() {
   require_tooling
+
+  # Verbose startup info
+  if [ "$VERBOSE_MODE" = "1" ]; then
+    log "📋 Configuration:"
+    log "   ROOT_DIR: $ROOT_DIR"
+    log "   BASE_BRANCH: $BASE_BRANCH"
+    log "   MAX_TURNS: $MAX_TURNS"
+    log "   CHECK_INTERVAL: ${CHECK_INTERVAL}s"
+    log "   MAX_CHECK_WAIT: $MAX_CHECK_WAIT iterations"
+    log "   MAX_COPILOT_WAIT: ${MAX_COPILOT_WAIT:-$MAX_CHECK_WAIT} iterations"
+    log "   PARALLEL_MODE: $PARALLEL_MODE"
+    if [ "$PARALLEL_MODE" = "1" ]; then
+      log "   MAX_PENDING_PRS: $MAX_PENDING_PRS"
+      log "   PARALLEL_CHECK_INTERVAL: ${PARALLEL_CHECK_INTERVAL}s"
+    fi
+    log "   DEBUG_MODE: $DEBUG_MODE"
+    log ""
+  fi
 
   # Safety check: warn if working tree is dirty (uncommitted changes)
   if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
