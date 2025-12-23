@@ -1533,58 +1533,6 @@ phase_merge_pr() {
   log "✅ Epic merged and marked completed: $epic_id"
 }
 
-# ============================================
-# PHASE: WAIT_PENDING_PRS (parallel mode only)
-# ============================================
-phase_wait_pending_prs() {
-  log "⏳ PHASE: WAIT_PENDING_PRS"
-
-  local pending_count
-  pending_count="$(state_count_pending_prs)"
-
-  if [ "$pending_count" -eq 0 ]; then
-    log "✅ No pending PRs, continuing to find next epic"
-    state_set "FIND_EPIC" "null"
-    return 0
-  fi
-
-  log "📋 Waiting for $pending_count pending PR(s) to be reviewed..."
-
-  local check_count=0
-  while true; do
-    check_count=$((check_count + 1))
-
-    # Check all pending PRs
-    local pr_to_fix=""
-    if ! pr_to_fix="$(check_all_pending_prs)"; then
-      # A PR needs fixes
-      if [ -n "$pr_to_fix" ]; then
-        log "🔧 PR for epic $pr_to_fix needs fixes, pausing to fix..."
-        fix_pending_pr_issues "$pr_to_fix"
-      fi
-    fi
-
-    # Re-check pending count after potential merges
-    pending_count="$(state_count_pending_prs)"
-
-    if [ "$pending_count" -eq 0 ]; then
-      log "✅ All pending PRs processed"
-      state_set "FIND_EPIC" "null"
-      return 0
-    fi
-
-    # Check if we can now start a new epic
-    if [ "$pending_count" -lt "$MAX_PENDING_PRS" ]; then
-      log "📋 Slot available for new epic ($pending_count/$MAX_PENDING_PRS pending)"
-      state_set "FIND_EPIC" "null"
-      return 0
-    fi
-
-    log "… Still waiting ($pending_count pending PRs, check #$check_count)"
-    sleep "$PARALLEL_CHECK_INTERVAL"
-  done
-}
-
 main() {
   require_tooling
 
@@ -1598,10 +1546,8 @@ main() {
     log "   MAX_CHECK_WAIT: $MAX_CHECK_WAIT iterations"
     log "   MAX_COPILOT_WAIT: ${MAX_COPILOT_WAIT:-$MAX_CHECK_WAIT} iterations"
     log "   PARALLEL_MODE: $PARALLEL_MODE"
-    if [ "$PARALLEL_MODE" = "1" ]; then
-      log "   MAX_PENDING_PRS: $MAX_PENDING_PRS"
-      log "   PARALLEL_CHECK_INTERVAL: ${PARALLEL_CHECK_INTERVAL}s"
-    fi
+    log "   MAX_PENDING_PRS: $MAX_PENDING_PRS"
+    log "   PARALLEL_CHECK_INTERVAL: ${PARALLEL_CHECK_INTERVAL}s"
     log "   DEBUG_MODE: $DEBUG_MODE"
     log ""
   fi
@@ -1697,9 +1643,6 @@ main() {
         ;;
       "MERGE_PR")
         phase_merge_pr
-        ;;
-      "WAIT_PENDING_PRS")
-        phase_wait_pending_prs
         ;;
       "BLOCKED")
         log "⚠️ BLOCKED - manual intervention needed"
