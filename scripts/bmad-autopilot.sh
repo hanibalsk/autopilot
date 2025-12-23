@@ -87,11 +87,11 @@ autopilot_checks() {
     (cd "$ROOT_DIR/frontend" && pnpm run check)
     # Run typecheck only if script exists in package.json
     if (cd "$ROOT_DIR/frontend" && pnpm run typecheck --help >/dev/null 2>&1); then
-      (cd "$ROOT_DIR/frontend" && pnpm run typecheck) || true
+      (cd "$ROOT_DIR/frontend" && pnpm run typecheck)
     fi
     # Run tests only if script exists
     if (cd "$ROOT_DIR/frontend" && pnpm run test --help >/dev/null 2>&1); then
-      (cd "$ROOT_DIR/frontend" && pnpm -r run test) || true
+      (cd "$ROOT_DIR/frontend" && pnpm -r run test)
     fi
   fi
 
@@ -891,8 +891,15 @@ run_claude_interactive() {
   log "Starting interactive Claude session..."
   log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-  # Run Claude interactively with prompt as argument
-  claude --permission-mode acceptEdits "$prompt" 2>&1 | tee "$output_file"
+  # Run Claude interactively - use script to capture output while preserving TTY
+  # This allows proper terminal interaction while still logging output
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    # macOS syntax: script -q file command...
+    script -q "$output_file" claude --permission-mode acceptEdits "$prompt"
+  else
+    # Linux syntax: script -q -c "command" file
+    script -q -c "claude --permission-mode acceptEdits \"$prompt\"" "$output_file"
+  fi
 }
 
 # ============================================
@@ -1061,7 +1068,11 @@ phase_develop_stories() {
   local epic_id
   epic_id="$(state_current_epic)"
 
-  require_clean_git
+  # Check for clean git state (warn but don't exit)
+  if [ -n "$(git status --porcelain)" ]; then
+    log "⚠️ Git working tree not clean - committing pending changes first"
+    git add -A && git commit -m "chore: auto-commit before story development" || true
+  fi
 
   local output_file="$TMP_DIR/develop-stories-output.txt"
 
@@ -1389,6 +1400,7 @@ phase_wait_checks() {
 
   log "⚠️ Timeout waiting for checks/approval"
   state_set "BLOCKED" "\"$epic_id\""
+  return 1
 }
 
 # ============================================
@@ -1510,7 +1522,11 @@ phase_merge_pr() {
   local epic_id
   epic_id="$(state_current_epic)"
 
-  gh pr merge --squash --delete-branch
+  if ! gh pr merge --squash --delete-branch; then
+    log "❌ Failed to merge PR - may need manual intervention"
+    state_set "BLOCKED" "\"$epic_id\""
+    return 1
+  fi
 
   git checkout "$BASE_BRANCH"
   git pull origin "$BASE_BRANCH"
