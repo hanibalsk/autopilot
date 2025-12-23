@@ -37,39 +37,39 @@ echo "✅ All prerequisites found"
 echo ""
 
 # Backup existing files before installation
-backup_if_exists() {
+BACKUP_CREATED=false
+backup_file() {
   local file="$1"
   if [ -f "$file" ]; then
     mkdir -p "$BACKUP_DIR"
     local backup_zip="$BACKUP_DIR/${TIMESTAMP}.zip"
-    echo "📦 Backing up existing file: $file"
+    if [ "$BACKUP_CREATED" = false ]; then
+      echo "⚠️  Found existing files, creating backup..."
+      BACKUP_CREATED=true
+    fi
+    echo "   → $(basename "$file")"
     zip -q -u "$backup_zip" "$file" 2>/dev/null || zip -q "$backup_zip" "$file"
   fi
 }
 
 # Check for existing installation and backup
 echo "🔍 Checking for existing installation..."
-files_to_backup=()
-[ -f "$TARGET_DIR/.autopilot/bmad-autopilot.sh" ] && files_to_backup+=("$TARGET_DIR/.autopilot/bmad-autopilot.sh")
-[ -f "$TARGET_DIR/.autopilot/config" ] && files_to_backup+=("$TARGET_DIR/.autopilot/config")
-[ -f "$TARGET_DIR/.autopilot/config.example" ] && files_to_backup+=("$TARGET_DIR/.autopilot/config.example")
 
-# Check for Claude commands
-if [ -d "$TARGET_DIR/.claude/commands" ]; then
-  for cmd_file in "$TARGET_DIR/.claude/commands/autopilot.md" "$TARGET_DIR/.claude/commands/bmad-autopilot.md"; do
-    [ -f "$cmd_file" ] && files_to_backup+=("$cmd_file")
-  done
-fi
+# Backup autopilot files
+backup_file "$TARGET_DIR/.autopilot/bmad-autopilot.sh"
+backup_file "$TARGET_DIR/.autopilot/config"
+backup_file "$TARGET_DIR/.autopilot/config.example"
 
-if [ ${#files_to_backup[@]} -gt 0 ]; then
-  echo "⚠️  Found existing files, creating backup..."
-  mkdir -p "$BACKUP_DIR"
-  backup_zip="$BACKUP_DIR/${TIMESTAMP}.zip"
-  for file in "${files_to_backup[@]}"; do
-    echo "   → $(basename "$file")"
-    zip -q -u "$backup_zip" "$file" 2>/dev/null || zip -q "$backup_zip" "$file"
-  done
-  echo "✅ Backup created: $backup_zip"
+# Backup local Claude commands
+backup_file "$TARGET_DIR/.claude/commands/autopilot.md"
+backup_file "$TARGET_DIR/.claude/commands/bmad-autopilot.md"
+
+# Backup global Claude commands
+backup_file "$HOME/.claude/commands/autopilot.md"
+backup_file "$HOME/.claude/commands/bmad-autopilot.md"
+
+if [ "$BACKUP_CREATED" = true ]; then
+  echo "✅ Backup created: $BACKUP_DIR/${TIMESTAMP}.zip"
 else
   echo "✅ No existing installation found"
 fi

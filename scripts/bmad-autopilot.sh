@@ -595,10 +595,12 @@ check_all_pending_prs() {
 
   log "🔍 Checking $(echo "$pending_prs" | jq 'length') pending PR(s)..."
 
-  local needs_attention=false
   local pr_to_fix=""
 
-  echo "$pending_prs" | jq -c '.[]' | while read -r pr_info; do
+  # Use process substitution to avoid subshell issues with while loop
+  while read -r pr_info; do
+    [ -z "$pr_info" ] && continue
+
     local epic_id
     epic_id="$(echo "$pr_info" | jq -r '.epic')"
     local pr_number
@@ -625,20 +627,20 @@ check_all_pending_prs() {
         ;;
       "needs_fixes")
         log "⚠️ PR #$pr_number (epic $epic_id) needs fixes"
-        # Mark that we need to pause and fix this PR
-        echo "$epic_id" > "$TMP_DIR/pr_needs_fix.txt"
+        # Mark first PR that needs fixes (will handle one at a time)
+        if [ -z "$pr_to_fix" ]; then
+          pr_to_fix="$epic_id"
+        fi
         ;;
       "waiting")
         debug "PR #$pr_number (epic $epic_id) still waiting for review/CI"
         state_update_pending_pr "$epic_id" "last_check" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         ;;
     esac
-  done
+  done < <(echo "$pending_prs" | jq -c '.[]')
 
   # Check if any PR needs fixes
-  if [ -f "$TMP_DIR/pr_needs_fix.txt" ]; then
-    pr_to_fix="$(cat "$TMP_DIR/pr_needs_fix.txt")"
-    rm -f "$TMP_DIR/pr_needs_fix.txt"
+  if [ -n "$pr_to_fix" ]; then
     echo "$pr_to_fix"
     return 1
   fi
@@ -692,11 +694,25 @@ fix_pending_pr_issues() {
   pr_number="$(echo "$pr_info" | jq -r '.pr_number')"
   local wt_path
   wt_path="$(echo "$pr_info" | jq -r '.worktree')"
+  local branch_name="feature/epic-${epic_id}"
 
   log "🔧 Fixing issues in PR #$pr_number (epic $epic_id)"
 
   # Save current active context
   state_save_active_context
+
+  # Create worktree on-demand if it doesn't exist
+  if [ ! -d "$wt_path" ]; then
+    log "🌳 Creating worktree for $epic_id..."
+    mkdir -p "$WORKTREE_DIR"
+    # Fetch the branch first
+    git fetch origin "$branch_name" 2>/dev/null || true
+    git worktree add "$wt_path" "$branch_name" 2>/dev/null || {
+      log "❌ Failed to create worktree for $branch_name"
+      state_restore_active_context
+      return 1
+    }
+  fi
 
   # Switch to the worktree and fix issues
   if [ -d "$wt_path" ]; then
@@ -1026,17 +1042,21 @@ phase_create_pr() {
 
   if [ "$PARALLEL_MODE" = "1" ]; then
     # Parallel mode: add PR to pending list and start next epic
+    local branch_name="feature/epic-${epic_id}"
     local wt_path
     wt_path="$(worktree_path "$epic_id")"
 
-    # Create worktree for this PR if not exists
-    if ! worktree_exists "$epic_id"; then
-      local branch_name="feature/epic-${epic_id}"
-      worktree_create "$epic_id" "$branch_name"
-    fi
+    # We are currently ON the feature branch, so we can't create a worktree for it directly.
+    # Instead, we'll switch to main first, then the worktree can track the remote branch.
+    # The worktree is only needed if we need to fix issues later.
+    # For now, just record the path - worktree will be created on-demand in fix_pending_pr_issues()
 
     state_add_pending_pr "$epic_id" "$pr_number" "$wt_path"
     log "✅ PR #$pr_number created for epic $epic_id, added to pending list"
+
+    # Switch back to main for next epic
+    git checkout main
+    git pull origin main
 
     # Check if we can start another epic (respect MAX_PENDING_PRS)
     local pending_count
@@ -1065,7 +1085,12 @@ phase_wait_copilot() {
   epic_id="$(state_current_epic)"
 
   local pr_number
-  pr_number="$(gh pr view --json number -q '.number')"
+  pr_number="$(gh pr view --json number -q '.number' 2>/dev/null || echo "")"
+  if [ -z "$pr_number" ]; then
+    log "❌ Could not get PR number - PR may not exist"
+    state_set "BLOCKED" "\"$epic_id\""
+    return 1
+  fi
   log "Waiting for GitHub Copilot review on PR #$pr_number"
 
   # Get the last processed Copilot comment/review ID to avoid reacting to old ones
@@ -1075,8 +1100,11 @@ phase_wait_copilot() {
     log "Last processed Copilot ID: $last_processed_id"
   fi
 
+  # Timeout for waiting for Copilot (use MAX_CHECK_WAIT as default)
+  local max_copilot_wait="${MAX_COPILOT_WAIT:-$MAX_CHECK_WAIT}"
+
   local i=0
-  while true; do
+  while [ "$i" -lt "$max_copilot_wait" ]; do
     i=$((i + 1))
 
     # Copilot can post as:
@@ -1163,6 +1191,11 @@ phase_wait_copilot() {
       return 0
     fi
   done
+
+  # Timeout reached
+  log "⚠️ Timeout waiting for Copilot review ($max_copilot_wait iterations)"
+  state_set "BLOCKED" "\"$epic_id\""
+  return 1
 }
 
 # ============================================
