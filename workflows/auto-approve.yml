@@ -102,24 +102,45 @@ jobs:
             exit 1
           fi
 
-      - name: Check review status
+      - name: Check approval conditions
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_NUMBER=${{ steps.pr.outputs.number }}
           REPO=${{ github.repository }}
+          OWNER="${REPO%/*}"
+          REPO_NAME="${REPO#*/}"
 
-          echo "Checking review status for PR #$PR_NUMBER..."
+          echo "Checking approval conditions for PR #$PR_NUMBER..."
 
-          # Count Copilot reviews (GitHub Copilot pull request reviewer bot)
-          # Using type=Bot check for reliability, with login containing "copilot"
+          # 1. Check time since last push (must be at least 10 minutes)
+          LAST_PUSH=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.repo.pushed_at')
+          LAST_PUSH_TS=$(date -d "$LAST_PUSH" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_PUSH" +%s 2>/dev/null || echo "0")
+          NOW_TS=$(date +%s)
+          MINUTES_SINCE_PUSH=$(( (NOW_TS - LAST_PUSH_TS) / 60 ))
+          echo "Minutes since last push: $MINUTES_SINCE_PUSH"
+
+          if [ "$MINUTES_SINCE_PUSH" -lt 10 ]; then
+            echo "should_approve=false" >> $GITHUB_OUTPUT
+            echo "reason=Only $MINUTES_SINCE_PUSH minutes since last push (need 10+)" >> $GITHUB_OUTPUT
+            echo "⏳ Too soon after push: $MINUTES_SINCE_PUSH minutes (need 10+)"
+            exit 0
+          fi
+
+          # 2. Count Copilot reviews
           REVIEW_COUNT=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
             --jq '[.[] | select(.user.type == "Bot" and (.user.login | contains("copilot")))] | length')
-
           echo "Copilot reviews: $REVIEW_COUNT"
 
-          # Count unresolved threads (any author)
+          if [ "$REVIEW_COUNT" -eq 0 ]; then
+            echo "should_approve=false" >> $GITHUB_OUTPUT
+            echo "reason=No Copilot review found" >> $GITHUB_OUTPUT
+            echo "⏳ No Copilot review yet"
+            exit 0
+          fi
+
+          # 3. Check unresolved review threads
           UNRESOLVED=$(gh api graphql -f query='
             query($owner: String!, $repo: String!, $pr: Int!) {
               repository(owner: $owner, name: $repo) {
@@ -129,26 +150,69 @@ jobs:
                   }
                 }
               }
-            }' -f owner="${REPO%/*}" -f repo="${REPO#*/}" -F pr="$PR_NUMBER" \
+            }' -f owner="$OWNER" -f repo="$REPO_NAME" -F pr="$PR_NUMBER" \
             --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' 2>/dev/null || echo "0")
 
           echo "Unresolved threads: $UNRESOLVED"
 
-          # Approve if:
-          # 1. At least 1 Copilot review AND 0 unresolved threads, OR
-          # 2. Copilot reviewed but generated no comments (review count may be 0 but no threads exist)
-          if [ "$REVIEW_COUNT" -ge 1 ] && [ "$UNRESOLVED" -eq 0 ]; then
-            echo "should_approve=true" >> $GITHUB_OUTPUT
-            echo "reason=Copilot reviewed with $REVIEW_COUNT review(s) and 0 unresolved threads" >> $GITHUB_OUTPUT
-            echo "✅ $REVIEW_COUNT Copilot review(s), 0 unresolved - ready to approve"
-          elif [ "$UNRESOLVED" -eq 0 ]; then
-            # Copilot may have reviewed but generated no comments - still approve if CI passed
-            echo "should_approve=true" >> $GITHUB_OUTPUT
-            echo "reason=CI passed and no unresolved review comments" >> $GITHUB_OUTPUT
-            echo "✅ CI passed, 0 unresolved threads - ready to approve (Copilot may have reviewed with no comments)"
-          else
+          if [ "$UNRESOLVED" -gt 0 ]; then
             echo "should_approve=false" >> $GITHUB_OUTPUT
+            echo "should_dismiss=true" >> $GITHUB_OUTPUT
+            echo "reason=$UNRESOLVED unresolved review thread(s)" >> $GITHUB_OUTPUT
             echo "⏳ Cannot approve: $UNRESOLVED unresolved thread(s)"
+            exit 0
+          fi
+
+          # 4. Check for pending/unanswered review comments (comments without replies)
+          PENDING_COMMENTS=$(gh api graphql -f query='
+            query($owner: String!, $repo: String!, $pr: Int!) {
+              repository(owner: $owner, name: $repo) {
+                pullRequest(number: $pr) {
+                  reviewThreads(first: 100) {
+                    nodes {
+                      isResolved
+                      comments(first: 1) {
+                        nodes {
+                          author { login }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }' -f owner="$OWNER" -f repo="$REPO_NAME" -F pr="$PR_NUMBER" \
+            --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' 2>/dev/null || echo "0")
+
+          # 5. All conditions met - approve
+          echo "should_approve=true" >> $GITHUB_OUTPUT
+          echo "reason=Copilot reviewed ($REVIEW_COUNT reviews), 0 unresolved threads, ${MINUTES_SINCE_PUSH}min since push" >> $GITHUB_OUTPUT
+          echo "✅ All conditions met - ready to approve"
+
+      - name: Dismiss stale approval if conditions not met
+        if: steps.check.outputs.should_dismiss == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=${{ steps.pr.outputs.number }}
+          REPO=${{ github.repository }}
+          REASON="${{ steps.check.outputs.reason }}"
+
+          echo "Checking for stale approvals to dismiss..."
+
+          # Find auto-approve reviews (from github-actions bot)
+          REVIEW_IDS=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
+            --jq '[.[] | select(.state == "APPROVED" and (.user.login | contains("github-actions") or contains("bot")))] | .[].id')
+
+          if [ -n "$REVIEW_IDS" ]; then
+            for REVIEW_ID in $REVIEW_IDS; do
+              echo "Dismissing review $REVIEW_ID..."
+              gh api -X PUT "repos/$REPO/pulls/$PR_NUMBER/reviews/$REVIEW_ID/dismissals" \
+                -f message="🔄 Approval dismissed: $REASON. Please resolve issues and re-trigger." \
+                2>/dev/null || echo "Could not dismiss review $REVIEW_ID"
+            done
+            echo "⚠️ Dismissed stale approval(s)"
+          else
+            echo "No stale approvals to dismiss"
           fi
 
       - name: Auto-approve PR
@@ -164,3 +228,13 @@ jobs:
           _This approval was automatically granted by the CI workflow._"
 
           echo "✅ PR #$PR_NUMBER approved!"
+
+      - name: Skip approval (conditions not met)
+        if: steps.check.outputs.should_approve == 'false'
+        run: |
+          echo "⏳ Skipping approval: ${{ steps.check.outputs.reason }}"
+          echo "Please ensure:"
+          echo "  - All review threads are resolved"
+          echo "  - All review comments are answered"
+          echo "  - At least 10 minutes since last push"
+          echo "  - Copilot has completed review"
