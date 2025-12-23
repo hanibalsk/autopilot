@@ -855,7 +855,7 @@ STATUS: FIXED
   return 0
 }
 
-# Run Claude headless and capture output to a file
+# Run Claude in headless mode (background/automated tasks)
 # Usage: run_claude_headless "prompt" [max_turns] [allowed_tools] [output_file]
 run_claude_headless() {
   local prompt="$1"
@@ -872,6 +872,27 @@ run_claude_headless() {
     --allowedTools "$allowed_tools" \
     --max-turns "$max_turns" \
     2>&1 | tee "$output_file"
+}
+
+# Run Claude in interactive foreground mode (main development work)
+# Usage: run_claude_interactive "prompt" [output_file]
+run_claude_interactive() {
+  local prompt="$1"
+  local output_file="${2:-$TMP_DIR/claude-output.txt}"
+
+  log "🤖 Claude interactive (foreground)"
+  verbose "   Output: $output_file"
+
+  # Save prompt to file for reference
+  local prompt_file="$TMP_DIR/claude-prompt.md"
+  echo "$prompt" > "$prompt_file"
+
+  log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  log "Starting interactive Claude session..."
+  log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # Run Claude interactively with prompt as argument
+  claude --permission-mode acceptEdits "$prompt" 2>&1 | tee "$output_file"
 }
 
 # ============================================
@@ -1044,24 +1065,23 @@ phase_develop_stories() {
 
   local output_file="$TMP_DIR/develop-stories-output.txt"
 
-  run_claude_headless "
+  # Main development runs in interactive foreground mode
+  run_claude_interactive "
 /bmad:bmm:workflows:dev-story develop epic stories ${epic_id}.*
 
-## YOLO MODE ENABLED
+## Development Task
 For each story in epic ${epic_id}:
 1. Create storyfile if it doesn't exist
 2. Implement the story completely
 3. Write unit tests
 4. Commit after each story: git add -A && git commit -m \"feat(${epic_id}): [story description]\"
 
-Work autonomously without asking questions. Make your own decisions.
-
 When you complete ALL stories, respond exactly:
 STATUS: STORIES_COMPLETE
 
 If you encounter a blocker you cannot resolve:
 STATUS: STORIES_BLOCKED - [reason]
-" 50 "Bash,Read,Write,Edit,Grep" "$output_file"
+" "$output_file"
 
   # Check Claude output for BLOCKED status
   if grep -qi "STATUS: STORIES_BLOCKED" "$output_file" 2>/dev/null; then
@@ -1088,50 +1108,34 @@ phase_code_review() {
   local epic_id
   epic_id="$(state_current_epic)"
 
-  # First: Run BMAD code-review workflow
+  # Run BMAD code-review workflow in interactive foreground mode
   log "Running BMAD code-review workflow for epic $epic_id"
-  run_claude_headless "
+  run_claude_interactive "
 /bmad:bmm:workflows:code-review ${epic_id}-*
 
+## Code Review Task
 Review all code changes for epic ${epic_id}.
 Fix any issues found during the review.
-Commit fixes: git add -A && git commit -m 'fix: address code review feedback'
+
+Steps:
+1. Review diff: git diff $BASE_BRANCH...HEAD
+2. Fix issues you find (readability, architecture, tests, lint)
+3. Run local checks to verify
+4. Commit fixes: git add -A && git commit -m 'fix: address code review feedback'
 
 At the end, output exactly:
 STATUS: CODE_REVIEW_DONE
-" 30 "Bash,Read,Write,Edit,Grep"
+"
 
-  # Then: Verify checks pass with retry loop
-  local attempts=0
-  local max_attempts=3
+  # Verify checks pass
+  if autopilot_checks; then
+    git push 2>/dev/null || true
+    state_set "CREATE_PR" "\"$epic_id\""
+    log "✅ Code review passed"
+    return 0
+  fi
 
-  while [ "$attempts" -lt "$max_attempts" ]; do
-    attempts=$((attempts + 1))
-    log "Verification attempt $attempts/$max_attempts"
-
-    run_claude_headless "
-Verify all code review issues are resolved. Check and fix any remaining problems.
-
-Steps:
-1. Review diff: git diff main...HEAD
-2. Fix issues you find (readability, architecture, tests, lint)
-3. If you change code, commit: git add -A && git commit -m \"fix: review cleanup\"
-
-At the end, output exactly:
-STATUS: REVIEW_DONE
-" 20 "Bash,Read,Write,Edit,Grep"
-
-    if autopilot_checks; then
-      git push 2>/dev/null || true
-      state_set "CREATE_PR" "\"$epic_id\""
-      log "✅ Code review passed"
-      return 0
-    fi
-
-    log "⚠️ Checks still failing after review attempt, retrying..."
-  done
-
-  log "❌ Code review failed after $max_attempts attempts"
+  log "⚠️ Local checks failed after code review"
   state_set "BLOCKED" "\"$epic_id\""
   return 1
 }
