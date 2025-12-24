@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
 # BMAD Autopilot Uninstaller
+# Compatible with bash 3.x (macOS default)
 #
 set -euo pipefail
 
@@ -23,32 +24,34 @@ fi
 echo "📍 Target directory: $TARGET_DIR"
 echo ""
 
-# Detect what's installed
+# Detect what's installed - use simple arrays (bash 3.x compatible)
 echo "🔍 Detecting installed components..."
-COMPONENTS=()
-declare -A COMPONENT_PATHS
+
+# Autopilot components (parallel arrays for name and path)
+AUTOPILOT_NAMES=()
+AUTOPILOT_PATHS=()
 
 if [ -f "$TARGET_DIR/.autopilot/bmad-autopilot.sh" ]; then
-    COMPONENTS+=("autopilot-script")
-    COMPONENT_PATHS["autopilot-script"]="$TARGET_DIR/.autopilot/bmad-autopilot.sh"
+    AUTOPILOT_NAMES+=("autopilot-script")
+    AUTOPILOT_PATHS+=("$TARGET_DIR/.autopilot/bmad-autopilot.sh")
     echo "   ✓ Main script: .autopilot/bmad-autopilot.sh"
 fi
 
 if [ -f "$TARGET_DIR/.autopilot/config" ]; then
-    COMPONENTS+=("autopilot-config")
-    COMPONENT_PATHS["autopilot-config"]="$TARGET_DIR/.autopilot/config"
+    AUTOPILOT_NAMES+=("autopilot-config")
+    AUTOPILOT_PATHS+=("$TARGET_DIR/.autopilot/config")
     echo "   ✓ Config file: .autopilot/config"
 fi
 
 if [ -f "$TARGET_DIR/.autopilot/config.example" ]; then
-    COMPONENTS+=("autopilot-config-example")
-    COMPONENT_PATHS["autopilot-config-example"]="$TARGET_DIR/.autopilot/config.example"
+    AUTOPILOT_NAMES+=("autopilot-config-example")
+    AUTOPILOT_PATHS+=("$TARGET_DIR/.autopilot/config.example")
     echo "   ✓ Config example: .autopilot/config.example"
 fi
 
 if [ -d "$TARGET_DIR/.autopilot/state" ]; then
-    COMPONENTS+=("autopilot-state")
-    COMPONENT_PATHS["autopilot-state"]="$TARGET_DIR/.autopilot/state"
+    AUTOPILOT_NAMES+=("autopilot-state")
+    AUTOPILOT_PATHS+=("$TARGET_DIR/.autopilot/state")
     echo "   ✓ State files: .autopilot/state/"
 fi
 
@@ -113,7 +116,7 @@ fi
 
 echo ""
 
-TOTAL_COMPONENTS=$((${#COMPONENTS[@]} + ${#LOCAL_COMMANDS[@]} + ${#LOCAL_SKILLS[@]} + ${#GLOBAL_COMMANDS[@]} + ${#GLOBAL_SKILLS[@]}))
+TOTAL_COMPONENTS=$((${#AUTOPILOT_PATHS[@]} + ${#LOCAL_COMMANDS[@]} + ${#LOCAL_SKILLS[@]} + ${#GLOBAL_COMMANDS[@]} + ${#GLOBAL_SKILLS[@]}))
 if [ -n "$GITHUB_WORKFLOW" ]; then
     TOTAL_COMPONENTS=$((TOTAL_COMPONENTS + 1))
 fi
@@ -146,7 +149,7 @@ echo "📦 Creating backup..."
 # Initialize manifest
 cat > "$BACKUP_MANIFEST" << EOF
 # BMAD Autopilot Uninstall Backup Manifest
-# Created: $(date -Iseconds)
+# Created: $(date '+%Y-%m-%dT%H:%M:%S')
 # Target: $TARGET_DIR
 # Archive: uninstall_${TIMESTAMP}.zip
 #
@@ -185,30 +188,38 @@ backup_item() {
 }
 
 # Backup autopilot files
-for comp in "${COMPONENTS[@]}"; do
-    path="${COMPONENT_PATHS[$comp]}"
+for i in "${!AUTOPILOT_PATHS[@]}"; do
+    path="${AUTOPILOT_PATHS[$i]}"
     backup_item "$path" "autopilot" ".autopilot/$(basename "$path")"
 done
 
 # Backup local commands
-for cmd in "${LOCAL_COMMANDS[@]}"; do
-    backup_item "$cmd" "local-command" ".claude/commands/$(basename "$cmd")"
-done
+if [ ${#LOCAL_COMMANDS[@]} -gt 0 ]; then
+    for cmd in "${LOCAL_COMMANDS[@]}"; do
+        backup_item "$cmd" "local-command" ".claude/commands/$(basename "$cmd")"
+    done
+fi
 
 # Backup local skills
-for skill in "${LOCAL_SKILLS[@]}"; do
-    backup_item "$skill" "local-skill" ".claude/skills/$(basename "$skill")"
-done
+if [ ${#LOCAL_SKILLS[@]} -gt 0 ]; then
+    for skill in "${LOCAL_SKILLS[@]}"; do
+        backup_item "$skill" "local-skill" ".claude/skills/$(basename "$skill")"
+    done
+fi
 
 # Backup global commands
-for cmd in "${GLOBAL_COMMANDS[@]}"; do
-    backup_item "$cmd" "global-command" "~/.claude/commands/$(basename "$cmd")"
-done
+if [ ${#GLOBAL_COMMANDS[@]} -gt 0 ]; then
+    for cmd in "${GLOBAL_COMMANDS[@]}"; do
+        backup_item "$cmd" "global-command" "~/.claude/commands/$(basename "$cmd")"
+    done
+fi
 
 # Backup global skills
-for skill in "${GLOBAL_SKILLS[@]}"; do
-    backup_item "$skill" "global-skill" "~/.claude/skills/$(basename "$skill")"
-done
+if [ ${#GLOBAL_SKILLS[@]} -gt 0 ]; then
+    for skill in "${GLOBAL_SKILLS[@]}"; do
+        backup_item "$skill" "global-skill" "~/.claude/skills/$(basename "$skill")"
+    done
+fi
 
 # Backup GitHub workflow
 if [ -n "$GITHUB_WORKFLOW" ]; then
@@ -225,16 +236,16 @@ echo ""
 echo "🗑️  Removing components..."
 
 # Remove autopilot files
-if [ ${#COMPONENTS[@]} -gt 0 ]; then
-    for comp in "${COMPONENTS[@]}"; do
-        path="${COMPONENT_PATHS[$comp]}"
+if [ ${#AUTOPILOT_PATHS[@]} -gt 0 ]; then
+    for path in "${AUTOPILOT_PATHS[@]}"; do
         rm -rf "$path" 2>/dev/null || true
     done
     echo "   ✓ Removed autopilot files"
 fi
 
 # Remove local Claude commands
-if [ ${#LOCAL_COMMANDS[@]} -gt 0 ]; then
+LOCAL_COMMANDS_COUNT=${#LOCAL_COMMANDS[@]}
+if [ "$LOCAL_COMMANDS_COUNT" -gt 0 ]; then
     for cmd in "${LOCAL_COMMANDS[@]}"; do
         rm -f "$cmd" 2>/dev/null || true
     done
@@ -245,7 +256,8 @@ if [ ${#LOCAL_COMMANDS[@]} -gt 0 ]; then
 fi
 
 # Remove local Claude skills
-if [ ${#LOCAL_SKILLS[@]} -gt 0 ]; then
+LOCAL_SKILLS_COUNT=${#LOCAL_SKILLS[@]}
+if [ "$LOCAL_SKILLS_COUNT" -gt 0 ]; then
     for skill in "${LOCAL_SKILLS[@]}"; do
         rm -rf "$skill" 2>/dev/null || true
     done
@@ -259,7 +271,8 @@ fi
 rmdir "$TARGET_DIR/.claude" 2>/dev/null || true
 
 # Remove global Claude commands (ask first)
-if [ ${#GLOBAL_COMMANDS[@]} -gt 0 ]; then
+GLOBAL_COMMANDS_COUNT=${#GLOBAL_COMMANDS[@]}
+if [ "$GLOBAL_COMMANDS_COUNT" -gt 0 ]; then
     echo ""
     read -p "   Remove global Claude commands from ~/.claude/commands/? [y/N] " -n 1 -r
     echo ""
@@ -274,7 +287,8 @@ if [ ${#GLOBAL_COMMANDS[@]} -gt 0 ]; then
 fi
 
 # Remove global Claude skills (ask first)
-if [ ${#GLOBAL_SKILLS[@]} -gt 0 ]; then
+GLOBAL_SKILLS_COUNT=${#GLOBAL_SKILLS[@]}
+if [ "$GLOBAL_SKILLS_COUNT" -gt 0 ]; then
     echo ""
     read -p "   Remove global Claude skills from ~/.claude/skills/? [y/N] " -n 1 -r
     echo ""
@@ -331,9 +345,11 @@ if [ -f "$TARGET_DIR/.gitignore" ]; then
             if [[ "$OSTYPE" == "darwin"* ]]; then
                 sed -i '' '/^# BMAD Autopilot/d' "$TARGET_DIR/.gitignore"
                 sed -i '' '/^\.autopilot\/$/d' "$TARGET_DIR/.gitignore"
+                sed -i '' '/^\.autopilot-backups\/$/d' "$TARGET_DIR/.gitignore"
             else
                 sed -i '/^# BMAD Autopilot/d' "$TARGET_DIR/.gitignore"
                 sed -i '/^\.autopilot\/$/d' "$TARGET_DIR/.gitignore"
+                sed -i '/^\.autopilot-backups\/$/d' "$TARGET_DIR/.gitignore"
             fi
             echo "   ✓ Removed .autopilot/ from .gitignore"
         fi
